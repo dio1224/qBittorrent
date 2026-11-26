@@ -248,6 +248,7 @@ void SearchFilterBuilder::addRow(const QStringList &saved)
 {
     Row row;
     row.widget = new QWidget(this);
+    row.widget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     auto *layout = new QHBoxLayout(row.widget);
     layout->setContentsMargins(0, 0, 0, 0);
 
@@ -292,6 +293,9 @@ void SearchFilterBuilder::addRow(const QStringList &saved)
     row.days->setValue(30);
     row.days->setSuffix(tr(" days"));
     row.editors->addWidget(row.days);
+    // keep every row one line tall, whatever editor is showing
+    row.editors->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    row.editors->setFixedHeight(row.field->sizeHint().height());
     layout->addWidget(row.editors, 1);
 
     auto *remove = new QToolButton(row.widget);
