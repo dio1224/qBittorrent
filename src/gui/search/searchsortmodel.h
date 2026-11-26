@@ -33,6 +33,8 @@
 #include <QDateTime>
 #include <QList>
 #include <QRegularExpression>
+#include <QHash>
+#include <QSet>
 #include <QStringList>
 
 #include "base/utils/compare.h"
@@ -67,7 +69,8 @@ public:
     enum SearchDataRole
     {
         UnderlyingDataRole = Qt::UserRole,
-        SourcesRole                         // QStringList: every site that listed a merged result
+        SourcesRole,                        // QStringList: every site that listed a merged result
+        FilterValueRole                     // what a column value filter compares, when it differs from the text
     };
 
     // One condition from the filter builder
@@ -127,6 +130,17 @@ public:
     //! \brief Recompiles the name filter and rules after the synonym list changed
     void refreshSynonyms();
 
+    // Column value filters, like a spreadsheet's: show only rows whose cell is one of `values`
+    // (an empty set removes the column's filter). Engine matches any site that listed a row.
+    void setColumnValueFilter(int column, const QSet<QString> &values);
+    QSet<QString> columnValueFilter(int column) const;
+    bool hasColumnValueFilters() const;
+    // Whether a source row passes every filter except `column`'s value filter (for the filter menu's counts)
+    bool acceptsRowIgnoringColumn(int sourceRow, int column) const;
+    void clearColumnValueFilters();
+    // The value a column filter compares for one source row ("Too small for 4K" without the size)
+    static QString filterValue(const QAbstractItemModel *model, int sourceRow, int column, const QModelIndex &parent = {});
+
     void enableNameFilter(bool enabled);
     void setNameFilter(const QString &searchTerm = {});
 
@@ -184,6 +198,8 @@ private:
     QList<QRegularExpression> m_searchTermRegexes;
     QList<FilterRule> m_rawFilterRules;
     QList<FilterRule> m_rawLocalRules;
+    QHash<int, QSet<QString>> m_columnValueFilters;
+    mutable int m_ignoredValueColumn = -1;
     int m_minSeeds = 0, m_maxSeeds = -1;
     int m_minLeeches = 0, m_maxLeeches = -1;
     qint64 m_minSize = 0, m_maxSize = -1;

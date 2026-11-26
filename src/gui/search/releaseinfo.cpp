@@ -225,7 +225,8 @@ ReleaseInfo parseRelease(const QString &name)
         info.hdr = std::max(info.hdr, 1);
         hdrParts.append(u"HLG"_s);
     }
-    info.hdrText = hdrParts.join(u' ');
+    // only the best format: DV beats HDR10+, which beats HDR10/HDR; nothing means SDR
+    info.hdrText = hdrParts.isEmpty() ? u"SDR"_s : hdrParts.first();
 
     // --- Codec
     static const QRegularExpression x26x = re(u"(?<![a-z0-9])x26[45](?![a-z0-9])"_s);
@@ -376,12 +377,20 @@ ReleaseInfo parseRelease(const QString &name)
 
     if (has(n, atmos))
     {
-        base = base.isEmpty() ? u"Atmos"_s : (base + u" Atmos"_s);
+        // the top feature says enough: "TrueHD Atmos 7.1" -> "Atmos"
         info.audio = 5;
+        info.audioText = u"Atmos"_s;
     }
-    if (const auto m = channels.match(n); m.hasMatch() && (!base.isEmpty() || info.isMovie() || info.isEpisode()))
-        base += (base.isEmpty() ? QString() : u" "_s) + m.captured(1) + u'.' + m.captured(2);
-    info.audioText = base;
+    else if (info.audio == 5)
+    {
+        info.audioText = base;  // DTS:X
+    }
+    else
+    {
+        if (const auto m = channels.match(n); m.hasMatch() && (!base.isEmpty() || info.isMovie() || info.isEpisode()))
+            base += (base.isEmpty() ? QString() : u" "_s) + m.captured(1) + u'.' + m.captured(2);
+        info.audioText = base;
+    }
 
     // --- Not a video at all?
     static const QRegularExpression badFile = re(u"\\.(exe|scr|bat|msi|lnk|zip|rar|7z|apk|dmg|pkg)$|(?<![a-z0-9])(password|codec)(?![a-z0-9])"_s);

@@ -47,6 +47,7 @@
 #include <QProcess>
 #include <QProgressDialog>
 #include <QTemporaryFile>
+#include <QUrl>
 
 #include "base/global.h"
 #include "base/search/dioextras.h"
@@ -212,8 +213,24 @@ void DioExtrasMenu::refreshPass(QWidget *parent)
         return;
     }
 
+    // the sites with their own Cloudflare support first, then every other enabled search site
+    QList<std::pair<QString, QString>> sites = PASS_SITES;
+    const auto *manager = SearchPluginManager::instance();
+    for (const QString &plugin : manager->enabledPlugins())
+    {
+        const SearchPluginInfo *info = manager->pluginInfo(plugin);
+        if (!info || info->url.isEmpty())
+            continue;
+        const QString host = QUrl(info->url).host();
+        bool known = false;
+        for (const auto &site : PASS_SITES)
+            known = known || (QUrl(site.second).host() == host);
+        if (!known)
+            sites.append({info->fullName, info->url});
+    }
+
     QStringList names;
-    for (const auto &site : PASS_SITES)
+    for (const auto &site : sites)
         names.append(site.first);
     bool ok = false;
     const QString choice = QInputDialog::getItem(parent, QObject::tr("Cloudflare pass")
@@ -221,11 +238,22 @@ void DioExtrasMenu::refreshPass(QWidget *parent)
     if (!ok)
         return;
 
-    QString url;
-    for (const auto &site : PASS_SITES)
+    for (const auto &site : sites)
     {
         if (site.first == choice)
-            url = site.second;
+        {
+            refreshPassForSites(parent, {site});
+            break;
+        }
+    }
+}
+
+bool DioExtrasMenu::refreshPassForSites(QWidget *parent, const QList<std::pair<QString, QString>> &sites)
+{
+    if (!DioExtras::isHelperInstalled())
+    {
+        setUpHelper(parent);
+        return false;
     }
 
     QProgressDialog progress {QString(), QObject::tr("Cancel"), 0, 0, parent};
@@ -233,14 +261,28 @@ void DioExtrasMenu::refreshPass(QWidget *parent)
     progress.setWindowModality(Qt::WindowModal);
     progress.setMinimumDuration(0);
     progress.show();
-    const QString error = runStep(&progress, QObject::tr("Waiting for %1 in Chrome...").arg(choice)
-        , DioExtras::helperPython().data(), {(DioExtras::helperDir() / Path(u"cfpass.py"_s)).data(), u"refresh"_s, url}, 200000);
+
+    QStringList saved;
+    QStringList failed;
+    for (const auto &[name, url] : sites)
+    {
+        if (progress.wasCanceled())
+            break;
+        const QString error = runStep(&progress, QObject::tr("Getting past Cloudflare on %1. Chrome opens on the site; "
+            "if you see \"Verify you are human\", click it.").arg(name)
+            , DioExtras::helperPython().data(), {(DioExtras::helperDir() / Path(u"cfpass.py"_s)).data(), u"refresh"_s, url}, 200000);
+        if (error.isEmpty())
+            saved.append(name);
+        else
+            failed.append(u"%1: %2"_s.arg(name, error.trimmed().right(300)));
+    }
     progress.close();
 
-    if (error.isEmpty())
-        QMessageBox::information(parent, QObject::tr("Cloudflare pass"), QObject::tr("Pass saved for %1.").arg(choice));
-    else
-        QMessageBox::warning(parent, QObject::tr("Cloudflare pass"), QObject::tr("Couldn't get a pass:\n\n%1").arg(error));
+    if (failed.isEmpty() && !saved.isEmpty())
+        QMessageBox::information(parent, QObject::tr("Cloudflare pass"), QObject::tr("Pass saved for %1.").arg(saved.join(u", "_s)));
+    else if (!failed.isEmpty())
+        QMessageBox::warning(parent, QObject::tr("Cloudflare pass"), QObject::tr("Couldn't get a pass for:\n\n%1").arg(failed.join(u"\n\n"_s)));
+    return !saved.isEmpty();
 }
 
 void DioExtrasMenu::editRuTrackerLogin(QWidget *parent)

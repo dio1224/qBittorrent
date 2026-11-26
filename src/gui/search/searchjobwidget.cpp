@@ -214,8 +214,10 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
     m_searchListModel->setHeaderData(SearchSortModel::SOURCE, Qt::Horizontal, tr("Source"));
     m_searchListModel->setHeaderData(SearchSortModel::AUDIO, Qt::Horizontal, tr("Audio"));
     m_searchListModel->setHeaderData(SearchSortModel::CODEC, Qt::Horizontal, tr("Codec"));
-    m_searchListModel->setHeaderData(SearchSortModel::IN_PLEX, Qt::Horizontal, tr("In Plex"));
+    m_searchListModel->setHeaderData(SearchSortModel::IN_PLEX, Qt::Horizontal, tr("Ownership"));
     m_searchListModel->setHeaderData(SearchSortModel::WARNING, Qt::Horizontal, tr("Warning"));
+    for (int column = 0; column < SearchSortModel::NB_SEARCH_COLUMNS; ++column)
+        m_columnTitles.insert(column, m_searchListModel->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString());
     // Set columns text alignment
     m_searchListModel->setHeaderData(SearchSortModel::SIZE, Qt::Horizontal, QVariant(Qt::AlignRight | Qt::AlignVCenter), Qt::TextAlignmentRole);
     m_searchListModel->setHeaderData(SearchSortModel::SEEDS, Qt::Horizontal, QVariant(Qt::AlignRight | Qt::AlignVCenter), Qt::TextAlignmentRole);
@@ -309,11 +311,21 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
     m_cloudflareButton = new QPushButton(m_siteStatusBar);
     connect(m_cloudflareButton, &QPushButton::clicked, this, [this]()
     {
-        if (DioExtras::isHelperInstalled())
-            DioExtrasMenu::refreshPass(this);
-        else
+        if (!DioExtras::isHelperInstalled())
+        {
             DioExtrasMenu::setUpHelper(this);
-        if (DioExtras::isHelperInstalled())
+            return;
+        }
+        // a fresh pass for exactly the sites that were blocked, then search them again
+        QList<std::pair<QString, QString>> blocked;
+        for (const SearchEngineStatus &status : asConst(m_siteStatus))
+        {
+            if (status.state != u"blocked")
+                continue;
+            if (const SearchPluginInfo *info = SearchPluginManager::instance()->pluginInfo(status.plugin); info && !info->url.isEmpty())
+                blocked.append({status.name, info->url});
+        }
+        if (!blocked.isEmpty() && DioExtrasMenu::refreshPassForSites(this, blocked))
             retryFailedSites();
     });
     statusLayout->addWidget(m_cloudflareButton);
@@ -835,19 +847,96 @@ int SearchJobWidget::visibleColumnsCount() const
     return count;
 }
 
-void SearchJobWidget::displayColumnHeaderMenu()
+void SearchJobWidget::displayColumnHeaderMenu(const QPoint &pos)
 {
     auto *menu = new QMenu(this);
     menu->setAttribute(Qt::WA_DeleteOnClose);
-    menu->setTitle(tr("Column visibility"));
     menu->setToolTipsVisible(true);
 
+    // Spreadsheet-style filter for the column that was clicked: show only some of its values
+    const int column = header()->logicalIndexAt(pos);
+    const QList<int> valueColumns
+    {
+        SearchSortModel::RESOLUTION, SearchSortModel::HDR_FORMAT, SearchSortModel::SOURCE, SearchSortModel::AUDIO,
+        SearchSortModel::CODEC, SearchSortModel::IN_PLEX, SearchSortModel::WARNING, SearchSortModel::ENGINE_NAME
+    };
+    if (valueColumns.contains(column))
+    {
+        // every value in the column, with how many rows have it
+        // counted over the rows the other filters let through, like a spreadsheet does
+        QHash<QString, int> counts;
+        for (int row = 0; row < m_searchListModel->rowCount(); ++row)
+        {
+            if (!m_proxyModel->acceptsRowIgnoringColumn(row, column))
+                continue;
+            if (column == SearchSortModel::ENGINE_NAME)
+            {
+                const QStringList sites = m_searchListModel->index(row, column).data(SearchSortModel::SourcesRole).toStringList();
+                for (const QString &site : (sites.isEmpty() ? QStringList {SearchSortModel::filterValue(m_searchListModel, row, column)} : sites))
+                    ++counts[site];
+            }
+            else
+            {
+                ++counts[SearchSortModel::filterValue(m_searchListModel, row, column)];
+            }
+        }
+        for (const QString &value : m_proxyModel->columnValueFilter(column))
+            counts.insert(value, counts.value(value));
+        QStringList values = counts.keys();
+        std::sort(values.begin(), values.end(), [&counts](const QString &a, const QString &b)
+        {
+            if (a.isEmpty() != b.isEmpty())
+                return b.isEmpty();  // blanks last
+            return (counts.value(a) != counts.value(b)) ? (counts.value(a) > counts.value(b)) : (a < b);
+        });
+
+        const QSet<QString> current = m_proxyModel->columnValueFilter(column);
+        menu->addSection(tr("Show only (%1)").arg(m_columnTitles.value(column)));
+        QAction *allAction = menu->addAction(tr("All"), this, [this, column]()
+        {
+            m_proxyModel->setColumnValueFilter(column, {});
+            updateColumnFilterTitles();
+            updateResultsCount();
+        });
+        allAction->setCheckable(true);
+        allAction->setChecked(current.isEmpty());
+        for (const QString &value : asConst(values))
+        {
+            const QString label = (value.isEmpty() ? tr("(blank)") : value) + u"  (%1)"_s.arg(counts.value(value));
+            QAction *action = menu->addAction(label, this, [this, column, value]()
+            {
+                QSet<QString> selected = m_proxyModel->columnValueFilter(column);
+                if (selected.contains(value))
+                    selected.remove(value);
+                else
+                    selected.insert(value);
+                m_proxyModel->setColumnValueFilter(column, selected);
+                updateColumnFilterTitles();
+                updateResultsCount();
+            });
+            action->setCheckable(true);
+            action->setChecked(current.contains(value));
+        }
+        menu->addSeparator();
+    }
+    if (m_proxyModel->hasColumnValueFilters())
+    {
+        menu->addAction(tr("Clear all column filters"), this, [this]()
+        {
+            m_proxyModel->clearColumnValueFilters();
+            updateColumnFilterTitles();
+            updateResultsCount();
+        });
+        menu->addSeparator();
+    }
+
+    QMenu *columnsMenu = valueColumns.contains(column) ? menu->addMenu(tr("Columns")) : menu;
+    columnsMenu->setTitle(tr("Column visibility"));
     for (int i = 0; i < SearchSortModel::NB_SEARCH_COLUMNS; ++i)
     {
         if ((i == SearchSortModel::DL_LINK) || (i == SearchSortModel::DESC_LINK))
             continue;
-        const auto columnName = m_searchListModel->headerData(i, Qt::Horizontal, Qt::DisplayRole).toString();
-        QAction *action = menu->addAction(columnName, this, [this, i](const bool checked)
+        QAction *action = columnsMenu->addAction(m_columnTitles.value(i), this, [this, i](const bool checked)
         {
             if (!checked && (visibleColumnsCount() <= 1))
                 return;
@@ -863,8 +952,8 @@ void SearchJobWidget::displayColumnHeaderMenu()
         action->setChecked(!m_ui->resultsBrowser->isColumnHidden(i));
     }
 
-    menu->addSeparator();
-    QAction *resizeAction = menu->addAction(tr("Resize columns"), this, [this]()
+    columnsMenu->addSeparator();
+    QAction *resizeAction = columnsMenu->addAction(tr("Resize columns"), this, [this]()
     {
         for (int i = 0, count = m_ui->resultsBrowser->header()->count(); i < count; ++i)
         {
@@ -876,6 +965,27 @@ void SearchJobWidget::displayColumnHeaderMenu()
     resizeAction->setToolTip(tr("Resize all non-hidden columns to the size of their contents"));
 
     menu->popup(QCursor::pos());
+}
+
+void SearchJobWidget::updateColumnFilterTitles()
+{
+    // a filtered column shows what it's limited to: "Source: REMUX", "Audio: 2 kinds"
+    for (auto it = m_columnTitles.cbegin(); it != m_columnTitles.cend(); ++it)
+    {
+        const QSet<QString> selected = m_proxyModel->columnValueFilter(it.key());
+        QString title = it.value();
+        if (selected.size() == 1)
+        {
+            const QString value = *selected.cbegin();
+            title += u": "_s + (value.isEmpty() ? tr("(blank)") : value);
+        }
+        else if (selected.size() > 1)
+        {
+            title += u": "_s + tr("%1 kinds").arg(selected.size());
+        }
+        if (m_searchListModel->headerData(it.key(), Qt::Horizontal, Qt::DisplayRole).toString() != title)
+            m_searchListModel->setHeaderData(it.key(), Qt::Horizontal, title);
+    }
 }
 
 void SearchJobWidget::appendSearchResults(const QList<SearchResult> &results)
@@ -1161,6 +1271,10 @@ void SearchJobWidget::updatePlexColumn(const int row)
     const QString name = m_searchListModel->index(row, SearchSortModel::NAME).data(SearchSortModel::UnderlyingDataRole).toString();
     const PlexLibrary::Match match = PlexLibrary::instance()->lookup(name, info.release);
     setCell(row, SearchSortModel::IN_PLEX, match.text, match.rank, match.tooltip);
+    const QModelIndex index = m_searchListModel->index(row, SearchSortModel::IN_PLEX);
+    // already in qBittorrent: a down arrow instead of the word "Downloading"
+    m_searchListModel->setData(index, (match.downloading ? QVariant(UIThemeManager::instance()->getIcon(u"downloading"_s)) : QVariant()), Qt::DecorationRole);
+    m_searchListModel->setData(index, (match.filterValue.isEmpty() ? QVariant() : QVariant(match.filterValue)), SearchSortModel::FilterValueRole);
 }
 
 void SearchJobWidget::updateAllPlexColumns()
@@ -1182,7 +1296,7 @@ void SearchJobWidget::placeQualityColumns()
     const QList<std::pair<int, int>> columns
     {
         {SearchSortModel::RESOLUTION, 80}, {SearchSortModel::HDR_FORMAT, 90}, {SearchSortModel::SOURCE, 80},
-        {SearchSortModel::AUDIO, 130}, {SearchSortModel::IN_PLEX, 150}, {SearchSortModel::WARNING, 220}
+        {SearchSortModel::AUDIO, 110}, {SearchSortModel::IN_PLEX, 70}, {SearchSortModel::WARNING, 220}
     };
     for (const auto &[column, width] : columns)
     {
@@ -1276,7 +1390,7 @@ void SearchJobWidget::updateSiteStatus(const bool searchFinished)
     m_siteStatusLabel->setText(text);
     m_retrySitesButton->setVisible(!m_retrying);
     m_cloudflareButton->setVisible(anyBlocked);
-    m_cloudflareButton->setText(DioExtras::isHelperInstalled() ? tr("Get a fresh Cloudflare pass...") : tr("Set up Cloudflare helper..."));
+    m_cloudflareButton->setText(DioExtras::isHelperInstalled() ? tr("Get past Cloudflare and retry") : tr("Set up Cloudflare helper..."));
     m_turnOffButton->setVisible(!turnOffNames.isEmpty());
     m_turnOffButton->setText(tr("Turn off %1").arg(turnOffNames.join(u", "_s)));
     m_turnOffButton->setProperty("names", turnOffNames.join(u", "_s));

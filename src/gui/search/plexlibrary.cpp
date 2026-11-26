@@ -35,6 +35,8 @@
 #include <QUrl>
 #include <QUuid>
 
+#include "base/bittorrent/session.h"
+#include "base/bittorrent/torrent.h"
 #include "base/global.h"
 #include "base/logger.h"
 #include "base/path.h"
@@ -348,6 +350,20 @@ PlexLibrary::PlexLibrary(QObject *parent)
 {
     loadCache();
 
+    // torrents in qBittorrent count too ("Downloading")
+    m_downloadsTimer = new QTimer(this);
+    m_downloadsTimer->setSingleShot(true);
+    m_downloadsTimer->setInterval(800);
+    connect(m_downloadsTimer, &QTimer::timeout, this, &PlexLibrary::rebuildDownloads);
+    if (auto *session = BitTorrent::Session::instance())
+    {
+        connect(session, &BitTorrent::Session::torrentsLoaded, this, &PlexLibrary::scheduleDownloadsRebuild);
+        connect(session, &BitTorrent::Session::torrentAdded, this, &PlexLibrary::scheduleDownloadsRebuild);
+        connect(session, &BitTorrent::Session::torrentAboutToBeRemoved, this, &PlexLibrary::scheduleDownloadsRebuild);
+        connect(session, &BitTorrent::Session::torrentMetadataReceived, this, &PlexLibrary::scheduleDownloadsRebuild);
+    }
+    rebuildDownloads();
+
     // don't leave the reader running while the app closes
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this]()
     {
@@ -629,95 +645,190 @@ void PlexLibrary::applyItems(const QList<Item> &items, const QDateTime &updated)
 
 void PlexLibrary::rebuildMaps()
 {
-    m_movies.clear();
-    m_episodes.clear();
-    m_seasons.clear();
-    m_files.clear();
-    for (int i = 0; i < m_items.size(); ++i)
+    buildIndex(m_items, m_index);
+}
+
+void PlexLibrary::buildIndex(const QList<Item> &items, Index &index)
+{
+    index = {};
+    for (int i = 0; i < items.size(); ++i)
     {
-        const Item &item = m_items.at(i);
+        const Item &item = items.at(i);
         if (item.episode)
         {
-            m_episodes[key3(item.title, item.season, item.number)].append(i);
-            m_seasons[key2(item.title, item.season)].append(i);
+            if (item.number >= 0)
+                index.episodes[key3(item.title, item.season, item.number)].append(i);
+            index.seasons[key2(item.title, item.season)].append(i);
         }
-        else
+        else if (!item.title.isEmpty() && (item.year > 0))
         {
-            m_movies[key2(item.title, item.year)].append(i);
+            index.movies[key2(item.title, item.year)].append(i);
             if (!item.originalTitle.isEmpty() && (item.originalTitle != item.title))
-                m_movies[key2(item.originalTitle, item.year)].append(i);
+                index.movies[key2(item.originalTitle, item.year)].append(i);
         }
         for (const QString &file : item.files)
-            m_files.insert(file, i);
+            index.files.insert(file, i);
     }
 }
 
-PlexLibrary::Match PlexLibrary::lookup(const QString &releaseName, const ReleaseInfo &release) const
+void PlexLibrary::scheduleDownloadsRebuild()
 {
-    Match match;
-    if (m_items.isEmpty())
-        return match;
+    m_downloadsTimer->start();
+}
+
+void PlexLibrary::rebuildDownloads()
+{
+    m_downloads.clear();
+    if (const auto *session = BitTorrent::Session::instance())
+    {
+        for (const BitTorrent::Torrent *torrent : session->torrents())
+        {
+            const QString name = torrent->name();
+            const ReleaseInfo release = parseRelease(name);
+            Item item;
+            item.episode = release.isEpisode();
+            item.title = release.title;
+            item.year = release.year;
+            item.season = release.season;
+            item.number = release.episode;
+            item.displayTitle = name;
+            item.quality = {release.resolution, release.hdr, release.sourceTier()};
+            item.files = {normalizeTitle(name)};
+            m_downloads.append(item);
+        }
+    }
+    buildIndex(m_downloads, m_downloadsIndex);
+    emit indexChanged();
+}
+
+bool PlexLibrary::bestMatch(const QList<Item> &items, const Index &index, const QString &releaseName, const ReleaseInfo &release
+    , Quality &best, QString &description, bool &exact)
+{
+    if (items.isEmpty())
+        return false;
 
     QList<int> candidates;
-    bool exactFile = false;
     bool seasonPack = false;
-    if (const auto it = m_files.constFind(normalizeTitle(releaseName)); it != m_files.cend())
+    exact = false;
+    if (const auto it = index.files.constFind(normalizeTitle(releaseName)); it != index.files.cend())
     {
         candidates.append(it.value());
-        exactFile = true;
+        exact = true;
     }
     else if (release.isEpisode() && !release.title.isEmpty())
     {
         if (release.episode >= 0)
         {
-            candidates = m_episodes.value(key3(release.title, release.season, release.episode));
+            candidates = index.episodes.value(key3(release.title, release.season, release.episode));
         }
         else
         {
-            candidates = m_seasons.value(key2(release.title, release.season));
+            candidates = index.seasons.value(key2(release.title, release.season));
             seasonPack = true;
         }
     }
     else if (release.isMovie())
     {
         for (const int year : {release.year, (release.year - 1), (release.year + 1)})
-            candidates += m_movies.value(key2(release.title, year));
+            candidates += index.movies.value(key2(release.title, year));
     }
     if (candidates.isEmpty())
-        return match;
+        return false;
 
+    // a season pack counts by its worst episode
+    best = items.at(candidates.first()).quality;
+    for (const int i : asConst(candidates))
+    {
+        const Quality &quality = items.at(i).quality;
+        if (seasonPack ? !quality.isAtLeast(best) : quality.isAtLeast(best))
+            best = quality;
+    }
+    const Item &item = items.at(candidates.first());
+    description = seasonPack
+        ? tr("%1 episodes of season %2 of %3").arg(candidates.size()).arg(release.season).arg(item.displayTitle.section(u" S"_s, 0, 0))
+        : item.displayTitle;
+    return true;
+}
+
+PlexLibrary::Match PlexLibrary::lookup(const QString &releaseName, const ReleaseInfo &release) const
+{
+    Match match;
     const Quality wanted {release.resolution, release.hdr, release.sourceTier()};
 
-    // a season pack only counts when every episode Dio has from that season is good enough
-    Quality owned = m_items.at(candidates.first()).quality;
-    for (const int index : asConst(candidates))
+    Quality plexBest;
+    QString plexWhat;
+    bool plexExact = false;
+    const bool inPlex = bestMatch(m_items, m_index, releaseName, release, plexBest, plexWhat, plexExact);
+
+    Quality downloadBest;
+    QString downloadWhat;
+    bool downloadExact = false;
+    const bool downloading = bestMatch(m_downloads, m_downloadsIndex, releaseName, release, downloadBest, downloadWhat, downloadExact);
+
+    const bool plexGood = inPlex && (plexExact || plexBest.isAtLeast(wanted));
+    const bool downloadGood = downloading && (downloadExact || downloadBest.isAtLeast(wanted));
+
+    if (plexGood)
     {
-        const Quality &quality = m_items.at(index).quality;
-        if (seasonPack ? !quality.isAtLeast(owned) : quality.isAtLeast(owned))
-            owned = quality;
+        match.state = Match::State::Yes;
+        match.tooltip = plexExact
+            ? tr("Plex already has this exact release: %1 (%2).").arg(plexWhat, plexBest.text())
+            : tr("Plex has %1 in %2, the same or better than this listing.").arg(plexWhat, plexBest.text());
+    }
+    else if (downloadGood)
+    {
+        match.state = Match::State::Downloading;
+        match.tooltip = tr("Already in qBittorrent, the same or better: %1 (%2).").arg(downloadWhat, downloadBest.text());
+    }
+    else if (inPlex && (!downloading || plexBest.isAtLeast(downloadBest)))
+    {
+        match.state = Match::State::Worse;
+        match.tooltip = tr("Plex has %1 in %2, worse than this listing, so this would be an upgrade.").arg(plexWhat, plexBest.text());
+    }
+    else if (downloading)
+    {
+        match.state = Match::State::DownloadingWorse;
+        match.tooltip = tr("qBittorrent has %1 (%2), worse than this listing, so this would be an upgrade.").arg(downloadWhat, downloadBest.text());
+        if (inPlex)
+            match.tooltip += u'\n' + tr("Plex has %1 in %2.").arg(plexWhat, plexBest.text());
+    }
+    else if (!m_items.isEmpty())
+    {
+        match.state = Match::State::No;
+        match.tooltip = tr("Not in your Plex library or in qBittorrent.");
     }
 
-    if (!exactFile && !owned.isAtLeast(wanted))
-        return match;  // what Dio has is worse: this listing would be an upgrade, so it isn't flagged
-
-    const Item &item = m_items.at(candidates.first());
-    match.owned = true;
-    match.rank = (owned.resolution * 100) + (owned.hdr * 10) + owned.sourceTier;
-    if (exactFile)
+    switch (match.state)
     {
-        match.text = tr("Have this file");
-        match.tooltip = tr("Plex already has this exact release: %1 (%2).").arg(item.displayTitle, owned.text());
-    }
-    else if (seasonPack)
-    {
-        match.text = tr("Have S%1 (%2)").arg(release.season, 2, 10, QChar(u'0')).arg(owned.text());
-        match.tooltip = tr("Plex has %1 episodes of season %2 of %3, all at least %4, as good as or better than this listing.")
-            .arg(candidates.size()).arg(release.season).arg(item.displayTitle.section(u" S"_s, 0, 0), owned.text());
-    }
-    else
-    {
-        match.text = tr("Have %1").arg(owned.text());
-        match.tooltip = tr("Plex already has %1 in %2, as good as or better than this listing.").arg(item.displayTitle, owned.text());
+    case Match::State::Yes:
+        match.text = tr("Yes");
+        match.filterValue = match.text;
+        match.rank = 5;
+        match.owned = true;
+        break;
+    case Match::State::Downloading:
+        match.filterValue = tr("Downloading");
+        match.downloading = true;
+        match.rank = 4;
+        break;
+    case Match::State::Worse:
+        match.text = tr("Worse");
+        match.filterValue = match.text;
+        match.rank = 3;
+        break;
+    case Match::State::DownloadingWorse:
+        match.text = tr("Worse");
+        match.filterValue = tr("Downloading worse");
+        match.downloading = true;
+        match.rank = 2;
+        break;
+    case Match::State::No:
+        match.text = tr("No");
+        match.filterValue = match.text;
+        match.rank = 1;
+        break;
+    case Match::State::Unknown:
+        break;
     }
     return match;
 }

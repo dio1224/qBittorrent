@@ -411,9 +411,81 @@ bool SearchSortModel::ruleMatches(const int sourceRow, const QModelIndex &source
     return true;
 }
 
+void SearchSortModel::setColumnValueFilter(const int column, const QSet<QString> &values)
+{
+    if (values.isEmpty())
+        m_columnValueFilters.remove(column);
+    else
+        m_columnValueFilters.insert(column, values);
+    invalidateRowsFilter();
+}
+
+QSet<QString> SearchSortModel::columnValueFilter(const int column) const
+{
+    return m_columnValueFilters.value(column);
+}
+
+bool SearchSortModel::acceptsRowIgnoringColumn(const int sourceRow, const int column) const
+{
+    m_ignoredValueColumn = column;
+    const bool accepted = filterAcceptsRow(sourceRow, {});
+    m_ignoredValueColumn = -1;
+    return accepted;
+}
+
+bool SearchSortModel::hasColumnValueFilters() const
+{
+    return !m_columnValueFilters.isEmpty();
+}
+
+void SearchSortModel::clearColumnValueFilters()
+{
+    if (m_columnValueFilters.isEmpty())
+        return;
+    m_columnValueFilters.clear();
+    invalidateRowsFilter();
+}
+
+QString SearchSortModel::filterValue(const QAbstractItemModel *model, const int sourceRow, const int column, const QModelIndex &parent)
+{
+    const QModelIndex index = model->index(sourceRow, column, parent);
+    if (column == ENGINE_NAME)
+        return model->data(index, UnderlyingDataRole).toString();
+    if (const QVariant value = model->data(index, FilterValueRole); value.isValid())
+        return value.toString();
+    QString text = model->data(index, Qt::DisplayRole).toString();
+    if (column == WARNING)
+    {
+        // group warnings by kind: "Too small for 4K (0.7 GB) (+1 more)" -> "Too small for 4K"
+        static const QRegularExpression details {u"\\s*\\(.*$"_s};
+        text.remove(details);
+    }
+    return text;
+}
+
 bool SearchSortModel::filterAcceptsRow(const int sourceRow, const QModelIndex &sourceParent) const
 {
     const QAbstractItemModel *const sourceModel = this->sourceModel();
+
+    for (auto it = m_columnValueFilters.cbegin(); it != m_columnValueFilters.cend(); ++it)
+    {
+        if (it.key() == m_ignoredValueColumn)
+            continue;
+        if (it.key() == ENGINE_NAME)
+        {
+            // a merged row passes when any site that listed it is allowed
+            const QStringList sites = sourceModel->data(sourceModel->index(sourceRow, ENGINE_NAME, sourceParent), SourcesRole).toStringList();
+            bool allowed = it.value().contains(filterValue(sourceModel, sourceRow, ENGINE_NAME, sourceParent));
+            for (const QString &site : sites)
+                allowed = allowed || it.value().contains(site);
+            if (!allowed)
+                return false;
+        }
+        else if (!it.value().contains(filterValue(sourceModel, sourceRow, it.key(), sourceParent)))
+        {
+            return false;
+        }
+    }
 
     if (!rulesPass(m_filterRules, m_filterRulesMatchAll, sourceRow, sourceParent)
         || !rulesPass(m_localRules, m_localRulesMatchAll, sourceRow, sourceParent))

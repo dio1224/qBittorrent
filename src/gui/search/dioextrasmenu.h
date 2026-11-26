@@ -29,6 +29,10 @@
 #pragma once
 
 #include <functional>
+#include <utility>
+
+#include <QList>
+#include <QString>
 
 #include <QObject>
 
@@ -47,6 +51,8 @@ namespace DioExtrasMenu
 
     void setUpHelper(QWidget *parent);
     void refreshPass(QWidget *parent);
+    // Gets a fresh pass for each site (name, address) in turn; true when at least one worked
+    bool refreshPassForSites(QWidget *parent, const QList<std::pair<QString, QString>> &sites);
     void editRuTrackerLogin(QWidget *parent);
     void editSearchOptions(QWidget *parent, const std::function<void ()> &onChanged);
 }

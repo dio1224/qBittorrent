@@ -121,7 +121,7 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
 
 private slots:
-    void displayColumnHeaderMenu();
+    void displayColumnHeaderMenu(const QPoint &pos);
 
 private:
     struct RowInfo
@@ -166,6 +166,7 @@ private:
     void onEngineStatuses(const QList<SearchEngineStatus> &statuses);
     void updateSiteStatus(bool searchFinished);
     void retryFailedSites();
+    void updateColumnFilterTitles();
     void updateResultsCount();
     void setStatus(Status value);
     void downloadTorrent(const QModelIndex &rowIndex, AddTorrentOption option = AddTorrentOption::Default);
@@ -211,6 +212,7 @@ private:
     QPushButton *m_cloudflareButton = nullptr;
     QPushButton *m_turnOffButton = nullptr;
     QStringList m_turnOffCandidates;
+    QHash<int, QString> m_columnTitles;
     QStandardItemModel *m_searchListModel = nullptr;
     SearchSortModel *m_proxyModel = nullptr;
     LineEdit *m_lineEditSearchResultsFilter = nullptr;
