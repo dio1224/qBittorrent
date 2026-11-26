@@ -95,6 +95,8 @@ add_library(qbt_gui STATIC
     rss/rsswidget.h
     search/dioextrasmenu.h
     search/searchfilterbuilder.h
+    search/plexlibrary.h
+    search/releaseinfo.h
     search/searchsynonyms.h
     search/searchjobwidget.h
     search/searchpluginselectdialog.h
@@ -204,6 +206,8 @@ add_library(qbt_gui STATIC
     rss/rsswidget.cpp
     search/dioextrasmenu.cpp
     search/searchfilterbuilder.cpp
+    search/plexlibrary.cpp
+    search/releaseinfo.cpp
     search/searchsynonyms.cpp
     search/searchjobwidget.cpp
     search/searchpluginselectdialog.cpp

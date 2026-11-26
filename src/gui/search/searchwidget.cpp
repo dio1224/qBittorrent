@@ -62,6 +62,7 @@
 #include "base/profile.h"
 #include "base/search/searchhandler.h"
 #include "base/search/searchpluginmanager.h"
+#include "base/settingsstorage.h"
 #include "base/utils/bytearray.h"
 #include "base/utils/compare.h"
 #include "base/utils/datetime.h"
@@ -72,6 +73,7 @@
 #include "gui/interfaces/iguiapplication.h"
 #include "gui/uithememanager.h"
 #include "dioextrasmenu.h"
+#include "plexlibrary.h"
 #include "searchfilterbuilder.h"
 #include "searchjobwidget.h"
 #include "searchpluginselectdialog.h"
@@ -102,6 +104,8 @@ const QString KEY_RESULT_PUBDATE = u"PubDate"_s;
 
 namespace
 {
+    const QString TAB_FILTERS_KEY = u"Search/Dio/TabFilters"_s;
+
     class SearchHistorySortModel final : public QSortFilterProxyModel
     {
         Q_OBJECT
@@ -423,7 +427,8 @@ SearchWidget::SearchWidget(IGUIApplication *app, QWidget *parent)
 
     connect(m_ui->pluginsButton, &QPushButton::clicked, this, &SearchWidget::pluginsButtonClicked);
 
-    // Filter rules: set before searching, applied to every results tab
+    // Filters for the next search. Each results tab gets its own copy when its search
+    // starts, so editing these never changes a search that's already running or done.
     m_filterBuilder = new SearchFilterBuilder(this);
     m_ui->verticalLayout_3->insertWidget(1, m_filterBuilder);
     connect(m_filterBuilder, &SearchFilterBuilder::searchAgainRequested, this, [this]()
@@ -431,13 +436,9 @@ SearchWidget::SearchWidget(IGUIApplication *app, QWidget *parent)
         if (!m_ui->lineEditSearchPattern->text().trimmed().isEmpty())
             searchButtonClicked();
     });
-    connect(m_filterBuilder, &SearchFilterBuilder::rulesChanged, this, [this]()
-    {
-        for (SearchJobWidget *tab : asConst(m_tabWidgets))
-            tab->setFilterRules(m_filterBuilder->rules(), m_filterBuilder->matchAll());
-    });
-    for (SearchJobWidget *tab : asConst(m_tabWidgets))
-        tab->setFilterRules(m_filterBuilder->rules(), m_filterBuilder->matchAll());
+
+    // What's already in Plex (read in the background, at most every few hours)
+    QMetaObject::invokeMethod(this, []() { PlexLibrary::instance()->refreshIfStale(); }, Qt::QueuedConnection);
 
     // Extras: Cloudflare helper and RuTracker login for the bundled plugins
     auto *extrasButton = new QPushButton(tr("Extras"), this);
@@ -669,9 +670,9 @@ int SearchWidget::addTab(const QString &tabID, SearchJobWidget *searchJobWdget)
     Q_ASSERT(!m_tabWidgets.contains(tabID));
 
     connect(searchJobWdget, &SearchJobWidget::statusChanged, this, [this, searchJobWdget]() { tabStatusChanged(searchJobWdget); });
+    connect(searchJobWdget, &SearchJobWidget::refreshRequested, this, [this, searchJobWdget]() { refreshTab(searchJobWdget); });
+    connect(searchJobWdget, &SearchJobWidget::filtersChanged, this, [searchJobWdget]() { storeTabFilters(searchJobWdget); });
     m_tabWidgets.insert(tabID, searchJobWdget);
-    if (m_filterBuilder)
-        searchJobWdget->setFilterRules(m_filterBuilder->rules(), m_filterBuilder->matchAll());
     return m_ui->tabWidget->addTab(searchJobWdget, makeTabName(searchJobWdget));
 }
 
@@ -773,6 +774,9 @@ void SearchWidget::restoreSession()
             , [this](const QString &tabID, const QString &searchPattern, const QList<SearchResult> &searchResults)
     {
         auto *restoredTab = new SearchJobWidget(tabID, searchPattern, searchResults, app(), this);
+        const QStringList saved = SettingsStorage::instance()->loadValue<QVariantMap>(TAB_FILTERS_KEY).value(tabID).toStringList();
+        if (!saved.isEmpty())
+            restoredTab->setSearchFilters(saved.mid(1), (saved.first() == u"1"));
         addTab(tabID, restoredTab);
     });
 
@@ -940,8 +944,11 @@ void SearchWidget::searchButtonClicked()
     // Tab Addition
     const QString newTabID = generateTabID();
     auto *newTab = new SearchJobWidget(newTabID, app(), this);
-    newTab->runSearches(pattern, planQueries(pattern), selectedCategory(), selectedPlugins());
+    newTab->setSearchFilters(m_filterBuilder->serializedRows(), m_filterBuilder->matchAll());
+    newTab->runSearches(pattern, planQueries(pattern, m_filterBuilder->searchWords(), m_filterBuilder->matchAll())
+        , selectedCategory(), selectedPlugins());
     const int tabIndex = addTab(newTabID, newTab);
+    storeTabFilters(newTab);
     m_ui->tabWidget->setTabToolTip(tabIndex, newTab->statusTip());
     m_ui->tabWidget->setTabIcon(tabIndex, UIThemeManager::instance()->getIcon(statusIconName(newTab->status())));
     m_ui->tabWidget->setCurrentWidget(newTab);
@@ -984,6 +991,7 @@ void SearchWidget::closeTab(const int index)
     const auto *tab = static_cast<SearchJobWidget *>(m_ui->tabWidget->widget(index));
     const QString tabID = tab->id();
     delete m_tabWidgets.take(tabID);
+    forgetTabFilters(tabID);
 
     QMetaObject::invokeMethod(m_dataStorage, [this, tabID] { m_dataStorage->removeTab(tabID); });
     saveSession();
@@ -996,6 +1004,7 @@ void SearchWidget::closeAllTabs()
         const auto *tab = static_cast<SearchJobWidget *>(m_ui->tabWidget->widget(tabIndex));
         const QString tabID = tab->id();
         delete m_tabWidgets.take(tabID);
+        forgetTabFilters(tabID);
         QMetaObject::invokeMethod(m_dataStorage, [this, tabID] { m_dataStorage->removeTab(tabID); });
     }
 
@@ -1010,21 +1019,42 @@ void SearchWidget::refreshTab(SearchJobWidget *searchJobWidget)
         return;
     }
 
-    // Re-launch search
+    // Re-launch search, with this tab's own filters
     const QString pattern = searchJobWidget->searchPattern();
-    searchJobWidget->runSearches(pattern, planQueries(pattern), selectedCategory(), selectedPlugins());
+    const QStringList words = m_filterBuilder->sendsWordsToSites() ? searchJobWidget->filterWords() : QStringList();
+    searchJobWidget->runSearches(pattern, planQueries(pattern, words, searchJobWidget->searchFiltersMatchAll())
+        , selectedCategory(), selectedPlugins());
 }
 
-QStringList SearchWidget::planQueries(const QString &pattern) const
+void SearchWidget::storeTabFilters(const SearchJobWidget *tab)
+{
+    auto *storage = SettingsStorage::instance();
+    QVariantMap all = storage->loadValue<QVariantMap>(TAB_FILTERS_KEY);
+    const QStringList rows = tab->searchFilterRows();
+    if (rows.isEmpty())
+        all.remove(tab->id());
+    else
+        all.insert(tab->id(), QStringList {(tab->searchFiltersMatchAll() ? u"1"_s : u"0"_s)} + rows);
+    storage->storeValue(TAB_FILTERS_KEY, all);
+}
+
+void SearchWidget::forgetTabFilters(const QString &tabID)
+{
+    auto *storage = SettingsStorage::instance();
+    QVariantMap all = storage->loadValue<QVariantMap>(TAB_FILTERS_KEY);
+    if (all.remove(tabID) > 0)
+        storage->storeValue(TAB_FILTERS_KEY, all);
+}
+
+QStringList SearchWidget::planQueries(const QString &pattern, const QStringList &words, const bool matchAll) const
 {
     const QStringList baseTerms = SearchSynonyms::splitTerms(pattern);
-    const QStringList words = m_filterBuilder->searchWords();
 
     // "all rules": the words go together; "any rule": one search per word
     QList<QStringList> wordSets;
     if (!words.isEmpty())
     {
-        if (m_filterBuilder->matchAll() || (words.size() == 1))
+        if (matchAll || (words.size() == 1))
         {
             wordSets.append(words);
         }

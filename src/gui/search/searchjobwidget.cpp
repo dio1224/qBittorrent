@@ -35,7 +35,10 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QFrame>
+#include <QHBoxLayout>
 #include <QHeaderView>
+#include <QLabel>
 #include <QKeyEvent>
 #include <QMenu>
 #include <QPushButton>
@@ -46,14 +49,19 @@
 #include <QUrl>
 
 #include "base/logger.h"
+#include "base/search/dioextras.h"
 #include "base/preferences.h"
 #include "base/search/searchdownloadhandler.h"
 #include "base/search/searchhandler.h"
 #include "base/search/searchpluginmanager.h"
+#include "base/settingsstorage.h"
 #include "base/utils/misc.h"
+#include "gui/desktopintegration.h"
 #include "gui/interfaces/iguiapplication.h"
 #include "gui/lineedit.h"
 #include "gui/uithememanager.h"
+#include "dioextrasmenu.h"
+#include "plexlibrary.h"
 #include "searchfilterbuilder.h"
 #include "searchsynonyms.h"
 #include "searchsortmodel.h"
@@ -201,6 +209,13 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
     m_searchListModel->setHeaderData(SearchSortModel::ENGINE_NAME, Qt::Horizontal, tr("Engine"));
     m_searchListModel->setHeaderData(SearchSortModel::ENGINE_URL, Qt::Horizontal, tr("Engine URL"));
     m_searchListModel->setHeaderData(SearchSortModel::PUB_DATE, Qt::Horizontal, tr("Published On"));
+    m_searchListModel->setHeaderData(SearchSortModel::RESOLUTION, Qt::Horizontal, tr("Resolution"));
+    m_searchListModel->setHeaderData(SearchSortModel::HDR_FORMAT, Qt::Horizontal, tr("HDR"));
+    m_searchListModel->setHeaderData(SearchSortModel::SOURCE, Qt::Horizontal, tr("Source"));
+    m_searchListModel->setHeaderData(SearchSortModel::AUDIO, Qt::Horizontal, tr("Audio"));
+    m_searchListModel->setHeaderData(SearchSortModel::CODEC, Qt::Horizontal, tr("Codec"));
+    m_searchListModel->setHeaderData(SearchSortModel::IN_PLEX, Qt::Horizontal, tr("In Plex"));
+    m_searchListModel->setHeaderData(SearchSortModel::WARNING, Qt::Horizontal, tr("Warning"));
     // Set columns text alignment
     m_searchListModel->setHeaderData(SearchSortModel::SIZE, Qt::Horizontal, QVariant(Qt::AlignRight | Qt::AlignVCenter), Qt::TextAlignmentRole);
     m_searchListModel->setHeaderData(SearchSortModel::SEEDS, Qt::Horizontal, QVariant(Qt::AlignRight | Qt::AlignVCenter), Qt::TextAlignmentRole);
@@ -220,6 +235,7 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
 
     m_ui->resultsBrowser->hideColumn(SearchSortModel::DL_LINK); // Hide url column
     m_ui->resultsBrowser->hideColumn(SearchSortModel::DESC_LINK);
+    placeQualityColumns();
 
     m_ui->resultsBrowser->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_ui->resultsBrowser->setRootIsDecorated(false);
@@ -272,7 +288,49 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
     {
         m_proxyModel->setLocalFilterRules(m_resultsFilterBuilder->rules(), m_resultsFilterBuilder->matchAll());
         updateResultsCount();
+        emit filtersChanged();
     });
+    connect(m_resultsFilterBuilder, &SearchFilterBuilder::searchAgainRequested, this, &SearchJobWidget::refreshRequested);
+
+    // Sites that failed in this tab's searches, with fixes
+    m_siteStatusBar = new QFrame(this);
+    m_siteStatusBar->setFrameShape(QFrame::StyledPanel);
+    auto *statusLayout = new QHBoxLayout(m_siteStatusBar);
+    statusLayout->setContentsMargins(8, 4, 8, 4);
+    auto *statusIcon = new QLabel(m_siteStatusBar);
+    statusIcon->setPixmap(UIThemeManager::instance()->getIcon(u"dialog-warning"_s).pixmap(16, 16));
+    statusLayout->addWidget(statusIcon);
+    m_siteStatusLabel = new QLabel(m_siteStatusBar);
+    m_siteStatusLabel->setWordWrap(true);
+    statusLayout->addWidget(m_siteStatusLabel, 1);
+    m_retrySitesButton = new QPushButton(tr("Retry these sites"), m_siteStatusBar);
+    connect(m_retrySitesButton, &QPushButton::clicked, this, &SearchJobWidget::retryFailedSites);
+    statusLayout->addWidget(m_retrySitesButton);
+    m_cloudflareButton = new QPushButton(m_siteStatusBar);
+    connect(m_cloudflareButton, &QPushButton::clicked, this, [this]()
+    {
+        if (DioExtras::isHelperInstalled())
+            DioExtrasMenu::refreshPass(this);
+        else
+            DioExtrasMenu::setUpHelper(this);
+        if (DioExtras::isHelperInstalled())
+            retryFailedSites();
+    });
+    statusLayout->addWidget(m_cloudflareButton);
+    m_turnOffButton = new QPushButton(m_siteStatusBar);
+    connect(m_turnOffButton, &QPushButton::clicked, this, [this]()
+    {
+        for (const QString &plugin : asConst(m_turnOffCandidates))
+            SearchPluginManager::instance()->enablePlugin(plugin, false);
+        m_turnOffButton->hide();
+        m_siteStatusLabel->setText(tr("Turned off %1. You can turn sites back on under Search plugins.")
+            .arg(m_turnOffButton->property("names").toString()));
+    });
+    statusLayout->addWidget(m_turnOffButton);
+    m_siteStatusBar->hide();
+    m_ui->verticalLayout->insertWidget(2, m_siteStatusBar);
+
+    connect(PlexLibrary::instance(), &PlexLibrary::indexChanged, this, &SearchJobWidget::updateAllPlexColumns);
 
     connect(m_ui->filterMode, qOverload<int>(&QComboBox::currentIndexChanged), this, &SearchJobWidget::updateNameFilter);
     connect(m_ui->minSeeds, &QAbstractSpinBox::editingFinished, this, &SearchJobWidget::updateSeedsFilter);
@@ -404,6 +462,10 @@ void SearchJobWidget::runSearches(const QString &pattern, const QStringList &que
     m_plugins = plugins;
     m_failedSearches = 0;
     m_searchCancelled = false;
+    m_siteStatus.clear();
+    m_retrying = false;
+    m_siteStatusCounted = false;
+    m_siteStatusBar->hide();
 
     updateResultsCount();
     setStatus(Status::Ongoing);
@@ -420,6 +482,7 @@ void SearchJobWidget::startPendingSearches()
         handler->setParent(this);
         m_searchHandlers.append(handler);
         connect(handler, &SearchHandler::newSearchResults, this, &SearchJobWidget::appendSearchResults);
+        connect(handler, &SearchHandler::engineStatusesReported, this, &SearchJobWidget::onEngineStatuses);
         connect(handler, &SearchHandler::searchFinished, this, [this, handler]() { onSearchDone(handler, false); });
         connect(handler, &SearchHandler::searchFailed, this, [this, handler]() { onSearchDone(handler, true); });
     }
@@ -440,6 +503,8 @@ void SearchJobWidget::onSearchDone(SearchHandler *handler, const bool failed)
 
     if (m_searchHandlers.isEmpty() && m_pendingQueries.isEmpty())
     {
+        if (!m_searchCancelled)
+            updateSiteStatus(true);
         if (m_searchCancelled)
             setStatus(Status::Aborted);
         else if (m_failedSearches >= m_queries.size())
@@ -606,8 +671,9 @@ void SearchJobWidget::updateResultsCount()
     const int filteredResults = m_proxyModel->rowCount();
     if (m_queries.size() > 1)
     {
-        m_ui->resultsLbl->setText(tr("Results (showing <i>%1</i> out of <i>%2</i>, from %3 searches):")
-                                  .arg(filteredResults).arg(totalResults).arg(m_queries.size()));
+        m_ui->resultsLbl->setText(tr("Results (showing <i>%1</i> out of <i>%2</i>, from %3 searches%4):")
+                                  .arg(filteredResults).arg(totalResults).arg(m_queries.size())
+                                  .arg(((filteredResults == 0) && (totalResults > 0)) ? tr("; none match the filters") : QString()));
     }
     else
     {
@@ -622,7 +688,9 @@ void SearchJobWidget::updateResultsCount()
             tip.append(u"  \u2022 "_s + query);
     }
     if (m_mergedCount > 0)
-        tip.append(tr("%1 duplicate listings merged into other rows").arg(m_mergedCount));
+        tip.append(tr("%1 repeat listings combined (the same release found by more than one search or site)").arg(m_mergedCount));
+    if ((filteredResults == 0) && (totalResults > 0))
+        tip.append(tr("None of the results match this tab's filters. Synonyms count: \"2160p\" also matches 4K and UHD."));
     m_ui->resultsLbl->setToolTip(tip.join(u'\n'));
 
     m_noSearchResults = (totalResults == 0);
@@ -774,8 +842,10 @@ void SearchJobWidget::displayColumnHeaderMenu()
     menu->setTitle(tr("Column visibility"));
     menu->setToolTipsVisible(true);
 
-    for (int i = 0; i < SearchSortModel::DL_LINK; ++i)
+    for (int i = 0; i < SearchSortModel::NB_SEARCH_COLUMNS; ++i)
     {
+        if ((i == SearchSortModel::DL_LINK) || (i == SearchSortModel::DESC_LINK))
+            continue;
         const auto columnName = m_searchListModel->headerData(i, Qt::Horizontal, Qt::DisplayRole).toString();
         QAction *action = menu->addAction(columnName, this, [this, i](const bool checked)
         {
@@ -877,12 +947,18 @@ void SearchJobWidget::addResultRow(const SearchResult &result, const QString &no
     info.sources = {result.engineName};
     info.sourceSeeds = {result.nbSeeders};
     info.listings = {result.engineName + u'\n' + result.fileUrl};
+    info.release = parseRelease(result.fileName);
     m_rowInfo.append(info);
 
     if (!infoHash.isEmpty())
         m_rowByHash.insert(infoHash, row);
     if (normName.size() >= MIN_MERGE_NAME_LENGTH)
         m_rowsByNameKey[normName.left(NAME_KEY_LENGTH)].append(row);
+
+    updateQualityColumns(row);
+    checkSameNameSizes(row);
+    updateWarningColumn(row);
+    updatePlexColumn(row);
 }
 
 int SearchJobWidget::findDuplicateRow(const QString &normName, const QString &infoHash, const qlonglong size) const
@@ -950,10 +1026,13 @@ void SearchJobWidget::mergeIntoRow(const int row, const SearchResult &result, co
     };
 
     // keep the complete name when a site cut it short
+    bool nameChanged = false;
     if ((normName.size() > info.normName.size()) && normName.startsWith(info.normName))
     {
         setData(SearchSortModel::NAME, result.fileName, result.fileName);
         info.normName = normName;
+        info.release = parseRelease(result.fileName);
+        nameChanged = true;
     }
 
     // the best-seeded listing is the one used for downloading
@@ -976,6 +1055,12 @@ void SearchJobWidget::mergeIntoRow(const int row, const SearchResult &result, co
     }
 
     updateSourcesDisplay(row);
+    if (nameChanged)
+    {
+        updateQualityColumns(row);
+        updatePlexColumn(row);
+    }
+    updateWarningColumn(row);
 }
 
 void SearchJobWidget::updateSourcesDisplay(const int row)
@@ -1011,6 +1096,240 @@ void SearchJobWidget::updateSourcesDisplay(const int row)
         tooltip = lines.join(u'\n');
     }
     m_searchListModel->setData(index, tooltip, Qt::ToolTipRole);
+}
+
+void SearchJobWidget::setCell(const int row, const int column, const QString &display, const QVariant &underlying, const QString &tooltip)
+{
+    const QModelIndex index = m_searchListModel->index(row, column);
+    m_searchListModel->setData(index, display, Qt::DisplayRole);
+    m_searchListModel->setData(index, underlying, SearchSortModel::UnderlyingDataRole);
+    m_searchListModel->setData(index, (tooltip.isEmpty() ? QVariant() : QVariant(tooltip)), Qt::ToolTipRole);
+}
+
+void SearchJobWidget::updateQualityColumns(const int row)
+{
+    const ReleaseInfo &release = m_rowInfo.at(row).release;
+    setCell(row, SearchSortModel::RESOLUTION, resolutionText(release.resolution), release.resolution);
+    setCell(row, SearchSortModel::HDR_FORMAT, release.hdrText, release.hdr);
+    setCell(row, SearchSortModel::SOURCE, release.sourceText, release.source);
+    setCell(row, SearchSortModel::AUDIO, release.audioText, release.audio);
+    setCell(row, SearchSortModel::CODEC, release.codec, release.codec);
+}
+
+void SearchJobWidget::checkSameNameSizes(const int row)
+{
+    // Fakes copy the names of popular releases: flag listings that share a name but not a size
+    RowInfo &info = m_rowInfo[row];
+    if ((info.size <= 0) || (info.normName.size() < MIN_MERGE_NAME_LENGTH))
+        return;
+    for (const int other : m_rowsByNameKey.value(info.normName.left(NAME_KEY_LENGTH)))
+    {
+        if (other == row)
+            continue;
+        RowInfo &otherInfo = m_rowInfo[other];
+        if ((otherInfo.normName != info.normName) || (otherInfo.size <= 0) || sizesClose(otherInfo.size, info.size, 0.08))
+            continue;
+        const QString warning = tr("Another listing with this exact name is a very different size (%1 vs %2)")
+            .arg(Utils::Misc::friendlyUnit(info.size), Utils::Misc::friendlyUnit(otherInfo.size));
+        const QString otherWarning = tr("Another listing with this exact name is a very different size (%1 vs %2)")
+            .arg(Utils::Misc::friendlyUnit(otherInfo.size), Utils::Misc::friendlyUnit(info.size));
+        if (!info.extraWarnings.contains(warning))
+            info.extraWarnings.append(warning);
+        if (!otherInfo.extraWarnings.contains(otherWarning))
+        {
+            otherInfo.extraWarnings.append(otherWarning);
+            updateWarningColumn(other);
+        }
+    }
+}
+
+void SearchJobWidget::updateWarningColumn(const int row)
+{
+    const RowInfo &info = m_rowInfo.at(row);
+    const QStringList warnings = info.release.warnings(info.size) + info.extraWarnings;
+    QString display;
+    if (!warnings.isEmpty())
+        display = (warnings.size() > 1) ? tr("%1 (+%2 more)").arg(warnings.first()).arg(warnings.size() - 1) : warnings.first();
+    setCell(row, SearchSortModel::WARNING, display, static_cast<int>(warnings.size()), warnings.join(u'\n'));
+    m_searchListModel->setData(m_searchListModel->index(row, SearchSortModel::NAME)
+        , (warnings.isEmpty() ? QVariant() : QVariant(UIThemeManager::instance()->getIcon(u"dialog-warning"_s))), Qt::DecorationRole);
+}
+
+void SearchJobWidget::updatePlexColumn(const int row)
+{
+    const RowInfo &info = m_rowInfo.at(row);
+    const QString name = m_searchListModel->index(row, SearchSortModel::NAME).data(SearchSortModel::UnderlyingDataRole).toString();
+    const PlexLibrary::Match match = PlexLibrary::instance()->lookup(name, info.release);
+    setCell(row, SearchSortModel::IN_PLEX, match.text, match.rank, match.tooltip);
+}
+
+void SearchJobWidget::updateAllPlexColumns()
+{
+    for (int row = 0; row < m_rowInfo.size(); ++row)
+        updatePlexColumn(row);
+}
+
+void SearchJobWidget::placeQualityColumns()
+{
+    // The first time these columns exist: put them after Leechers, with sensible widths
+    const QString placedKey = u"Search/Dio/QualityColumnsPlaced"_s;
+    auto *storage = SettingsStorage::instance();
+    if (storage->loadValue<bool>(placedKey))
+        return;
+
+    QHeaderView *headerView = header();
+    int target = headerView->visualIndex(SearchSortModel::LEECHES) + 1;
+    const QList<std::pair<int, int>> columns
+    {
+        {SearchSortModel::RESOLUTION, 80}, {SearchSortModel::HDR_FORMAT, 90}, {SearchSortModel::SOURCE, 80},
+        {SearchSortModel::AUDIO, 130}, {SearchSortModel::IN_PLEX, 150}, {SearchSortModel::WARNING, 220}
+    };
+    for (const auto &[column, width] : columns)
+    {
+        m_ui->resultsBrowser->setColumnHidden(column, false);
+        headerView->moveSection(headerView->visualIndex(column), target++);
+        m_ui->resultsBrowser->setColumnWidth(column, width);
+    }
+    m_ui->resultsBrowser->setColumnHidden(SearchSortModel::CODEC, true);
+    m_ui->resultsBrowser->setColumnWidth(SearchSortModel::CODEC, 70);
+
+    storage->storeValue(placedKey, true);
+    saveSettings();
+}
+
+void SearchJobWidget::onEngineStatuses(const QList<SearchEngineStatus> &statuses)
+{
+    const auto rank = [](const QString &state) { return (state == u"ok") ? 3 : ((state == u"empty") ? 2 : 1); };
+    for (const SearchEngineStatus &status : statuses)
+    {
+        const auto it = m_siteStatus.find(status.plugin);
+        if (it == m_siteStatus.end())
+            m_siteStatus.insert(status.plugin, status);
+        else if (rank(status.state) > rank(it->state))
+            *it = status;
+    }
+}
+
+void SearchJobWidget::updateSiteStatus(const bool searchFinished)
+{
+    QStringList failedNames;
+    QStringList details;
+    QStringList newlyFailed;
+    bool anyBlocked = false;
+
+    // how many searches in a row each site has failed, to suggest turning off dead ones
+    auto *storage = SettingsStorage::instance();
+    const QString streakKey = u"Search/Dio/SiteFailStreak"_s;
+    QVariantMap streaks = storage->loadValue<QVariantMap>(streakKey);
+    m_turnOffCandidates.clear();
+    QStringList turnOffNames;
+
+    for (const SearchEngineStatus &status : asConst(m_siteStatus))
+    {
+        const bool failed = (status.state != u"ok") && (status.state != u"empty");
+        if (!m_siteStatusCounted)
+            streaks[status.plugin] = failed ? (streaks.value(status.plugin).toInt() + 1) : 0;
+        if (!failed)
+            continue;
+
+        QString reason;
+        if (status.state == u"blocked")
+        {
+            reason = tr("blocked by Cloudflare");
+            anyBlocked = true;
+        }
+        else if (status.state == u"down")
+        {
+            reason = tr("site down or not answering");
+        }
+        else
+        {
+            reason = status.message.isEmpty() ? tr("error") : tr("error: %1").arg(status.message.left(90));
+        }
+        failedNames.append(status.name);
+        details.append(u"%1 (%2)"_s.arg(status.name, reason));
+
+        const int streak = streaks.value(status.plugin).toInt();
+        if (streak <= 1)
+            newlyFailed.append(status.name);
+        if (streak >= 5)
+        {
+            m_turnOffCandidates.append(status.plugin);
+            turnOffNames.append(status.name);
+        }
+    }
+    if (!m_siteStatusCounted)
+    {
+        storage->storeValue(streakKey, streaks);
+        m_siteStatusCounted = true;
+    }
+
+    if (failedNames.isEmpty())
+    {
+        m_siteStatusBar->hide();
+        return;
+    }
+
+    QString text = tr("%1 of the sites didn't return results: %2.").arg(failedNames.size()).arg(details.join(u", "_s));
+    if (!turnOffNames.isEmpty())
+        text += u' ' + tr("%1 has failed 5 or more searches in a row.").arg(turnOffNames.join(u", "_s));
+    m_siteStatusLabel->setText(text);
+    m_retrySitesButton->setVisible(!m_retrying);
+    m_cloudflareButton->setVisible(anyBlocked);
+    m_cloudflareButton->setText(DioExtras::isHelperInstalled() ? tr("Get a fresh Cloudflare pass...") : tr("Set up Cloudflare helper..."));
+    m_turnOffButton->setVisible(!turnOffNames.isEmpty());
+    m_turnOffButton->setText(tr("Turn off %1").arg(turnOffNames.join(u", "_s)));
+    m_turnOffButton->setProperty("names", turnOffNames.join(u", "_s));
+    m_siteStatusBar->show();
+
+    // A notification only when a site that was working stops; ongoing failures stay in the tab
+    if (searchFinished && !m_retrying && !newlyFailed.isEmpty())
+    {
+        app()->desktopIntegration()->showNotification(tr("Search: %1").arg(m_searchPattern)
+            , tr("%1 didn't return results. The search tab has the details and a retry button.").arg(newlyFailed.join(u", "_s)));
+    }
+}
+
+void SearchJobWidget::retryFailedSites()
+{
+    QStringList failed;
+    for (const SearchEngineStatus &status : asConst(m_siteStatus))
+    {
+        if ((status.state != u"ok") && (status.state != u"empty"))
+            failed.append(status.plugin);
+    }
+    if (failed.isEmpty() || m_queries.isEmpty() || !m_searchHandlers.isEmpty())
+        return;
+
+    // the same searches, only on the sites that failed; results join the ones already here
+    m_plugins = failed;
+    m_pendingQueries = m_queries;
+    m_failedSearches = 0;
+    m_searchCancelled = false;
+    m_retrying = true;
+    m_siteStatusBar->hide();
+    setStatus(Status::Ongoing);
+    startPendingSearches();
+}
+
+void SearchJobWidget::setSearchFilters(const QStringList &rows, const bool matchAll)
+{
+    m_resultsFilterBuilder->setRows(rows, matchAll);
+}
+
+QStringList SearchJobWidget::searchFilterRows() const
+{
+    return m_resultsFilterBuilder->serializedRows();
+}
+
+bool SearchJobWidget::searchFiltersMatchAll() const
+{
+    return m_resultsFilterBuilder->matchAll();
+}
+
+QStringList SearchJobWidget::filterWords() const
+{
+    return m_resultsFilterBuilder->requiredWords();
 }
 
 void SearchJobWidget::clearResults()

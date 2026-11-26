@@ -81,7 +81,9 @@ private:
     void closeAllTabs();
     void refreshTab(SearchJobWidget *searchJobWidget);
     // The site searches for one search: with the filter's words, as typed, and synonym variants
-    QStringList planQueries(const QString &pattern) const;
+    QStringList planQueries(const QString &pattern, const QStringList &words, bool matchAll) const;
+    static void storeTabFilters(const SearchJobWidget *tab);
+    static void forgetTabFilters(const QString &tabID);
     void applySearchOptionsToTabs();
     void showTabMenu(int index);
 

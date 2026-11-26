@@ -53,6 +53,14 @@ public:
         PUB_DATE,
         DL_LINK,
         DESC_LINK,
+        // Dio's build: read from the release name, Plex and checks
+        RESOLUTION,
+        HDR_FORMAT,
+        SOURCE,
+        AUDIO,
+        CODEC,
+        IN_PLEX,
+        WARNING,
         NB_SEARCH_COLUMNS
     };
 

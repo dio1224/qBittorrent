@@ -1,4 +1,4 @@
-# VERSION: 1.54
+# VERSION: 1.55
 
 # Author:
 #  Fabien Devaux <fab AT gnux DOT info>
@@ -196,6 +196,21 @@ def run_search(search_params: tuple[type[Engine], str, Category]) -> bool:
     """
 
     engine_class, what, cat = search_params
+
+    # Dio's build: count this engine's results and keep its error messages, then
+    # report one status line per engine so qBittorrent can show which sites failed.
+    module = sys.modules.get(engine_class.__module__)
+    counter = _ResultCounter()
+    patched = []
+    for owner in (module, sys.modules.get('novaprinter')):
+        original = getattr(owner, 'prettyPrinter', None) if owner is not None else None
+        if callable(original) and not isinstance(original, _CountingPrinter):
+            setattr(owner, 'prettyPrinter', _CountingPrinter(original, counter))
+            patched.append((owner, original))
+    real_stderr = sys.stderr
+    captured = _TeeStderr(real_stderr)
+    sys.stderr = captured
+    success = True
     try:
         engine = engine_class()
         # avoid exceptions due to invalid category
@@ -204,10 +219,86 @@ def run_search(search_params: tuple[type[Engine], str, Category]) -> bool:
                 engine.search(what, cat.name)
         else:
             engine.search(what)
-        return True
     except Exception:  # noqa: BLE001
         traceback.print_exc()
-        return False
+        success = False
+    finally:
+        sys.stderr = real_stderr
+        for owner, original in patched:
+            setattr(owner, 'prettyPrinter', original)
+        _report_status(engine_class, counter.count, captured.text(), success)
+    return success
+
+
+class _ResultCounter:
+    def __init__(self) -> None:
+        self.count = 0
+
+
+class _CountingPrinter:
+    def __init__(self, printer, counter: _ResultCounter) -> None:
+        self._printer = printer
+        self._counter = counter
+
+    def __call__(self, *args, **kwargs):
+        result = self._printer(*args, **kwargs)
+        self._counter.count += 1
+        return result
+
+
+class _TeeStderr:
+    """Passes everything through to stderr and keeps a copy (first 4000 characters)."""
+    def __init__(self, stream) -> None:
+        self._stream = stream
+        self._parts: list[str] = []
+        self._size = 0
+
+    def write(self, text: str) -> int:
+        if self._size < 4000:
+            self._parts.append(text)
+            self._size += len(text)
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def text(self) -> str:
+        return ''.join(self._parts)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+_BLOCKED_HINTS = ('forbidden', '403', 'cloudflare', 'just a moment', 'captcha', 'challenge', 'access denied', 'too many requests', '429')
+_DOWN_HINTS = ('timed out', 'timeout', 'gateway', '502', '503', '504', 'bad gateway', 'service unavailable',
+               'nodename nor servname', 'name or service not known', 'connection refused', 'unreachable',
+               'temporary failure', 'connection reset', 'remote end closed', 'certificate')
+
+
+def _report_status(engine_class, count: int, errors: str, success: bool) -> None:
+    lines = [line.strip() for line in errors.splitlines()
+             if line.strip() and not line.startswith('Got past Cloudflare')]
+    if not success and lines:
+        message = lines[-1]  # the exception itself
+    else:
+        message = next((line for line in lines if not line.startswith(('Traceback', 'File '))), '')
+    lowered = '\n'.join(lines).lower()
+    if count > 0:
+        state = 'ok'
+    elif not success:
+        state = 'error'
+    elif not lines:
+        state = 'empty'
+    elif any(hint in lowered for hint in _BLOCKED_HINTS):
+        state = 'blocked'
+    elif any(hint in lowered for hint in _DOWN_HINTS):
+        state = 'down'
+    else:
+        state = 'error'
+    name = getattr(engine_class, 'name', engine_class.__name__)
+    clean = ' '.join(message.split())[:180].replace('\t', ' ')
+    sys.stderr.write(f"DIO-STATUS\t{engine_class.__name__}\t{name}\t{count}\t{state}\t{clean}\n")
+    sys.stderr.flush()
 
 
 if __name__ == "__main__":

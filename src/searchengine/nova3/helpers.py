@@ -1,4 +1,4 @@
-# VERSION: 1.59
+# VERSION: 1.60
 
 # Author:
 #  Christophe DUMEZ (chris@qbittorrent.org)
@@ -88,6 +88,27 @@ def enable_socks_proxy(enable: bool) -> None:
 htmlentitydecode = html.unescape
 
 
+def _cloudflare_fetch(url: str) -> Optional[str]:
+    """Fetches a page through ~/.qbt-cf/cfpass.py (Dio's Cloudflare helper), or None."""
+    helper_python = os.path.expanduser("~/.qbt-cf/bin/python")
+    helper = os.path.expanduser("~/.qbt-cf/cfpass.py")
+    if not (os.path.exists(helper_python) and os.path.exists(helper)):
+        return None
+    import subprocess
+    host = urllib.parse.urlparse(url).hostname or url
+    try:
+        result = subprocess.run([helper_python, helper, "fetch", url], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=180)
+    except Exception as e:  # noqa: BLE001
+        print(f"Cloudflare helper could not run for {host}: {e!r}", file=sys.stderr)
+        return None
+    if result.returncode != 0:
+        print(f"Cloudflare helper could not get past the check on {host}", file=sys.stderr)
+        return None
+    print(f"Got past Cloudflare on {host} with the helper", file=sys.stderr)
+    return result.stdout.decode("utf-8", "replace")
+
+
 def retrieve_url(url: str, custom_headers: Mapping[str, str] = {}, request_data: Optional[Any] = None, ssl_context: Optional[ssl.SSLContext] = None, unescape_html_entities: bool = True) -> str:
     """
     Return the content of the url page as a string
@@ -101,6 +122,12 @@ def retrieve_url(url: str, custom_headers: Mapping[str, str] = {}, request_data:
             contentType = response.getheader('Content-Type', '')
             data: bytes = response.read()
     except urllib.error.URLError as errno:
+        # Dio's build: a site behind Cloudflare answers 403/429/503. When the Cloudflare
+        # helper is set up, get the page through it (it may open Chrome once to pass the check).
+        if (getattr(errno, 'code', None) in (403, 429, 503)) and (request_data is None):
+            page = _cloudflare_fetch(url)
+            if page is not None:
+                return html.unescape(page) if unescape_html_entities else page
         print(f"Connection error: {errno.reason}", file=sys.stderr)
         return ""
 

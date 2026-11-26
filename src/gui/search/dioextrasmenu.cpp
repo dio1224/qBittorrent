@@ -53,6 +53,7 @@
 #include "base/search/searchpluginmanager.h"
 #include "base/settingsstorage.h"
 #include "base/utils/foreignapps.h"
+#include "plexlibrary.h"
 #include "searchsynonyms.h"
 
 namespace
@@ -101,6 +102,32 @@ QMenu *DioExtrasMenu::create(QWidget *parent, const std::function<void ()> &onSe
     menu->addAction(QObject::tr("Search options (synonyms, duplicates)..."), parent, [parent, onSearchOptionsChanged]()
     {
         editSearchOptions(parent, onSearchOptionsChanged);
+    });
+
+    // Plex: mark results already in the library
+    QMenu *plexMenu = menu->addMenu(QObject::tr("Plex library"));
+    QObject::connect(plexMenu, &QMenu::aboutToShow, plexMenu, [plexMenu, parent]()
+    {
+        plexMenu->clear();
+        PlexLibrary *plex = PlexLibrary::instance();
+        QAction *status = plexMenu->addAction(plex->statusText());
+        status->setEnabled(false);
+        plexMenu->addSeparator();
+        if (plex->isConnected())
+        {
+            QAction *refreshAction = plexMenu->addAction(QObject::tr("Refresh library now"), plex, &PlexLibrary::refresh);
+            refreshAction->setEnabled(!plex->isLoading());
+            plexMenu->addAction(QObject::tr("Connect a different server..."), parent, [parent]() { PlexLibrary::instance()->connectAccount(parent); });
+            plexMenu->addAction(QObject::tr("Disconnect Plex"), parent, [parent]()
+            {
+                if (QMessageBox::question(parent, QObject::tr("Plex"), QObject::tr("Stop marking results you already own in Plex?")) == QMessageBox::Yes)
+                    PlexLibrary::instance()->disconnectAccount();
+            });
+        }
+        else
+        {
+            plexMenu->addAction(QObject::tr("Connect to Plex..."), parent, [parent]() { PlexLibrary::instance()->connectAccount(parent); });
+        }
     });
     menu->addSeparator();
     menu->addAction(QObject::tr("Set up Cloudflare helper..."), parent, [parent]() { setUpHelper(parent); });

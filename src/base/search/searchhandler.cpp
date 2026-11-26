@@ -160,7 +160,33 @@ void SearchHandler::processFinished(const int exitcode)
 {
     m_searchTimeout->stop();
 
-    const auto errMsg = QString::fromUtf8(m_searchProcess->readAllStandardError()).trimmed();
+    // Dio's build: nova2.py adds one "DIO-STATUS" line per site; take those out of the log text
+    QStringList errLines;
+    QList<SearchEngineStatus> statuses;
+    const QString stdErr = QString::fromUtf8(m_searchProcess->readAllStandardError());
+    for (const QString &line : stdErr.split(u'\n'))
+    {
+        if (line.startsWith(u"DIO-STATUS\t"))
+        {
+            const QStringList parts = line.split(u'\t');
+            if (parts.size() >= 6)
+            {
+                SearchEngineStatus status;
+                status.plugin = parts[1];
+                status.name = parts[2];
+                status.results = parts[3].toInt();
+                status.state = parts[4];
+                status.message = parts.mid(5).join(u' ').trimmed();
+                statuses.append(status);
+            }
+            continue;
+        }
+        errLines.append(line);
+    }
+    if (!statuses.isEmpty())
+        emit engineStatusesReported(statuses);
+
+    const auto errMsg = errLines.join(u'\n').trimmed();
     if (!errMsg.isEmpty())
     {
         qWarning("%s", qUtf8Printable(errMsg));

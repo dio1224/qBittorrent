@@ -37,6 +37,12 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QMenu>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QToolButton>
@@ -123,6 +129,29 @@ namespace
         }
     }
 
+    const QString KEY_PRESETS = u"Search/FilterBuilder/Presets"_s;
+
+    // Saved filter sets: {"name": {"rules": ["field|op|unit|value", ...], "matchAll": true}}
+    QJsonObject loadPresets()
+    {
+        const QString text = SettingsStorage::instance()->loadValue<QString>(KEY_PRESETS);
+        if (text.isEmpty())
+        {
+            // starting examples (Name contains ...)
+            return QJsonObject
+            {
+                {u"4K Dolby Vision"_s, QJsonObject {{u"rules"_s, QJsonArray {u"0|0|1|2160p"_s, u"0|0|1|DV"_s}}, {u"matchAll"_s, true}}},
+                {u"4K Dolby Vision REMUX"_s, QJsonObject {{u"rules"_s, QJsonArray {u"0|0|1|2160p"_s, u"0|0|1|DV"_s, u"0|0|1|REMUX"_s}}, {u"matchAll"_s, true}}}
+            };
+        }
+        return QJsonDocument::fromJson(text.toUtf8()).object();
+    }
+
+    void storePresets(const QJsonObject &presets)
+    {
+        SettingsStorage::instance()->storeValue(KEY_PRESETS, QString::fromUtf8(QJsonDocument(presets).toJson(QJsonDocument::Compact)));
+    }
+
     // size units offered next to the number box
     const QList<std::pair<QString, double>> SIZE_UNITS
     {
@@ -166,6 +195,13 @@ SearchFilterBuilder::SearchFilterBuilder(QWidget *parent, const Mode mode)
         onChanged();
     });
     header->addWidget(m_clearButton);
+
+    m_presetsButton = new QToolButton(this);
+    m_presetsButton->setText(tr("Presets"));
+    m_presetsButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    m_presetsButton->setToolTip(tr("Apply a saved set of filters, or save the current ones"));
+    connect(m_presetsButton, &QToolButton::clicked, this, &SearchFilterBuilder::showPresetsMenu);
+    header->addWidget(m_presetsButton);
     header->addStretch();
 
     m_sendWords = new QCheckBox(tr("Include required words in the search"), this);
@@ -176,8 +212,11 @@ SearchFilterBuilder::SearchFilterBuilder(QWidget *parent, const Mode mode)
     connect(m_sendWords, &QCheckBox::toggled, this, &SearchFilterBuilder::onChanged);
     header->addWidget(m_sendWords);
 
-    m_searchAgainButton = new QPushButton(UIThemeManager::instance()->getIcon(u"edit-find"_s), tr("Apply && search again"), this);
-    m_searchAgainButton->setToolTip(tr("Runs the search again from scratch with the filter's required words sent to the sites"));
+    m_searchAgainButton = new QPushButton(UIThemeManager::instance()->getIcon(u"edit-find"_s)
+        , ((mode == Mode::Search) ? tr("Apply && search again") : tr("Search again with these filters")), this);
+    m_searchAgainButton->setToolTip((mode == Mode::Search)
+        ? tr("Starts a new search with these filters, sending their required words to the sites")
+        : tr("Runs this tab's search again from scratch, sending these filters' required words to the sites"));
     connect(m_searchAgainButton, &QPushButton::clicked, this, &SearchFilterBuilder::searchAgainRequested);
     header->addWidget(m_searchAgainButton);
     outer->addLayout(header);
@@ -218,6 +257,110 @@ QStringList SearchFilterBuilder::searchWords() const
         }
     }
     return words;
+}
+
+bool SearchFilterBuilder::sendsWordsToSites() const
+{
+    return m_sendWords->isChecked();
+}
+
+QStringList SearchFilterBuilder::requiredWords() const
+{
+    QStringList words;
+    for (const Row &row : m_rows)
+    {
+        const SearchSortModel::FilterRule rule = ruleOf(row);
+        if ((rule.field == Field::Name) && ((rule.op == Op::Contains) || (rule.op == Op::ContainsWord)))
+        {
+            const QString text = rule.text.simplified();
+            if (!text.isEmpty())
+                words.append(text);
+        }
+    }
+    return words;
+}
+
+QStringList SearchFilterBuilder::serializedRows() const
+{
+    QStringList rows;
+    for (const Row &row : m_rows)
+        rows.append(serialize(row));
+    return rows;
+}
+
+void SearchFilterBuilder::setRows(const QStringList &rows, const bool matchAll)
+{
+    m_loading = true;
+    clearRows();
+    for (const QString &entry : rows)
+    {
+        // field|op|unit|value (value may contain '|')
+        const QStringList parts = entry.split(u'|');
+        if (parts.size() < 4)
+            continue;
+        addRow({parts[0], parts[1], parts.mid(3).join(u'|'), parts[2]});
+    }
+    m_matchMode->setCurrentIndex(matchAll ? 0 : 1);
+    m_loading = false;
+    updateHeaderVisibility();
+    onChanged();
+}
+
+void SearchFilterBuilder::showPresetsMenu()
+{
+    const QJsonObject presets = loadPresets();
+
+    QMenu menu(this);
+    for (auto it = presets.constBegin(); it != presets.constEnd(); ++it)
+    {
+        const QString name = it.key();
+        const QJsonObject preset = it.value().toObject();
+        menu.addAction(name, this, [this, preset]()
+        {
+            QStringList rows;
+            for (const QJsonValue &row : preset.value(u"rules").toArray())
+                rows.append(row.toString());
+            setRows(rows, preset.value(u"matchAll").toBool(true));
+        });
+    }
+    if (!presets.isEmpty())
+        menu.addSeparator();
+
+    QAction *saveAction = menu.addAction(tr("Save current filters as a preset..."), this, &SearchFilterBuilder::savePreset);
+    saveAction->setEnabled(!m_rows.isEmpty());
+
+    if (!presets.isEmpty())
+    {
+        QMenu *deleteMenu = menu.addMenu(tr("Delete preset"));
+        for (auto it = presets.constBegin(); it != presets.constEnd(); ++it)
+        {
+            const QString name = it.key();
+            deleteMenu->addAction(name, this, [name]()
+            {
+                QJsonObject all = loadPresets();
+                all.remove(name);
+                storePresets(all);
+            });
+        }
+    }
+
+    menu.exec(m_presetsButton->mapToGlobal(QPoint(0, m_presetsButton->height())));
+}
+
+void SearchFilterBuilder::savePreset()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, tr("Save preset"), tr("Name for these filters:")
+        , QLineEdit::Normal, {}, &ok).trimmed();
+    if (!ok || name.isEmpty())
+        return;
+
+    QJsonArray rules;
+    for (const QString &row : serializedRows())
+        rules.append(row);
+    QJsonObject all = loadPresets();
+    all.insert(name, QJsonObject {{u"rules"_s, rules}, {u"matchAll"_s, matchAll()}});
+    storePresets(all);
 }
 
 QList<SearchSortModel::FilterRule> SearchFilterBuilder::rules() const
@@ -449,7 +592,8 @@ void SearchFilterBuilder::updateHeaderVisibility()
     const bool searchMode = (m_mode == Mode::Search);
     m_addButton->setVisible(searchMode || !m_rows.isEmpty());
     m_sendWords->setVisible(searchMode && !m_rows.isEmpty());
-    m_searchAgainButton->setVisible(searchMode && !m_rows.isEmpty());
+    m_searchAgainButton->setVisible(!m_rows.isEmpty());
+    m_presetsButton->setVisible(searchMode || !m_rows.isEmpty());
 
 }
 

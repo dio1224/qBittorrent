@@ -34,15 +34,20 @@
 #include <QStringList>
 #include <QWidget>
 
+#include "base/search/searchhandler.h"
 #include "base/settingvalue.h"
 #include "gui/guiaddtorrentmanager.h"
 #include "gui/guiapplicationcomponent.h"
+#include "releaseinfo.h"
 #include "searchsortmodel.h"
 
 #define ENGINE_URL_COLUMN 4
 #define URL_COLUMN 5
 
+class QFrame;
 class QHeaderView;
+class QLabel;
+class QPushButton;
 class QModelIndex;
 class QStandardItemModel;
 
@@ -97,12 +102,20 @@ public:
     void runSearches(const QString &pattern, const QStringList &queries, const QString &category, const QStringList &plugins);
     // The synonym list or duplicate merging changed
     void applySearchOptions();
+
+    // This tab's own filters (copied from the filter bar when the search started)
+    void setSearchFilters(const QStringList &rows, bool matchAll);
+    QStringList searchFilterRows() const;
+    bool searchFiltersMatchAll() const;
+    QStringList filterWords() const;
     void setFilterRules(const QList<SearchSortModel::FilterRule> &rules, bool matchAll);
     void cancelSearch();
 
 signals:
     void resultsCountUpdated();
     void statusChanged();
+    void refreshRequested();
+    void filtersChanged();
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
@@ -121,6 +134,8 @@ private:
         QStringList sources;        // site of every distinct listing
         QList<qlonglong> sourceSeeds;
         QSet<QString> listings;     // site + download link, to spot the same listing found by several searches
+        ReleaseInfo release;
+        QStringList extraWarnings;
     };
 
     void loadSettings();
@@ -141,6 +156,16 @@ private:
     void mergeIntoRow(int row, const SearchResult &result, const QString &normName, const QString &infoHash);
     void updateSourcesDisplay(int row);
     void clearResults();
+    void setCell(int row, int column, const QString &display, const QVariant &underlying, const QString &tooltip = {});
+    void updateQualityColumns(int row);
+    void updateWarningColumn(int row);
+    void updatePlexColumn(int row);
+    void updateAllPlexColumns();
+    void checkSameNameSizes(int row);
+    void placeQualityColumns();
+    void onEngineStatuses(const QList<SearchEngineStatus> &statuses);
+    void updateSiteStatus(bool searchFinished);
+    void retryFailedSites();
     void updateResultsCount();
     void setStatus(Status value);
     void downloadTorrent(const QModelIndex &rowIndex, AddTorrentOption option = AddTorrentOption::Default);
@@ -176,6 +201,16 @@ private:
     QHash<QString, int> m_rowByHash;
     QHash<QString, QList<int>> m_rowsByNameKey;  // first 20 chars of the normalized name
     int m_mergedCount = 0;
+
+    QHash<QString, SearchEngineStatus> m_siteStatus;   // plugin -> best status across this tab's searches
+    bool m_retrying = false;
+    bool m_siteStatusCounted = false;
+    QFrame *m_siteStatusBar = nullptr;
+    QLabel *m_siteStatusLabel = nullptr;
+    QPushButton *m_retrySitesButton = nullptr;
+    QPushButton *m_cloudflareButton = nullptr;
+    QPushButton *m_turnOffButton = nullptr;
+    QStringList m_turnOffCandidates;
     QStandardItemModel *m_searchListModel = nullptr;
     SearchSortModel *m_proxyModel = nullptr;
     LineEdit *m_lineEditSearchResultsFilter = nullptr;

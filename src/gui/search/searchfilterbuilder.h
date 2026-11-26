@@ -39,6 +39,7 @@ class QDateEdit;
 class QDoubleSpinBox;
 class QLineEdit;
 class QPushButton;
+class QToolButton;
 class QSpinBox;
 class QStackedWidget;
 class QVBoxLayout;
@@ -62,12 +63,19 @@ public:
 
     void addEmptyRow();
 
+    // Rules as saved text ("field|op|unit|value"), to copy filters into a results tab or a preset
+    QStringList serializedRows() const;
+    void setRows(const QStringList &rows, bool matchAll);
+
     QList<SearchSortModel::FilterRule> rules() const;
     bool matchAll() const;
 
     // Words from "Name contains" rules to send to the sites (empty when the
     // option is off). With matchAll() they go together, otherwise one search each.
     QStringList searchWords() const;
+    // Words from "Name contains" rules, whatever the mode or the option
+    QStringList requiredWords() const;
+    bool sendsWordsToSites() const;
 
 signals:
     void rulesChanged();
@@ -97,6 +105,8 @@ private:
     void onChanged();
     void load();
     void save() const;
+    void showPresetsMenu();
+    void savePreset();
     void updateHeaderVisibility();
     Row *findRow(QWidget *rowWidget);
 
@@ -107,6 +117,7 @@ private:
     QPushButton *m_searchAgainButton = nullptr;
     QCheckBox *m_sendWords = nullptr;
     QPushButton *m_addButton = nullptr;
+    QToolButton *m_presetsButton = nullptr;
     Mode m_mode = Mode::Search;
     QList<Row> m_rows;
     bool m_loading = false;

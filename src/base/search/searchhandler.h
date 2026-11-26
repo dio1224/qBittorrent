@@ -52,6 +52,16 @@ struct SearchResult
     QDateTime pubDate;
 };
 
+// How one site did in one search (Dio's build: reported by nova2.py)
+struct SearchEngineStatus
+{
+    QString plugin;     // plugin module name, e.g. "leetx"
+    QString name;       // display name, e.g. "1337x"
+    int results = 0;
+    QString state;      // ok, empty, blocked, down, error
+    QString message;
+};
+
 class SearchPluginManager;
 
 class SearchHandler : public QObject
@@ -76,6 +86,7 @@ signals:
     void searchFinished(bool cancelled = false);
     void searchFailed(const QString &errorMessage);
     void newSearchResults(const QList<SearchResult> &results);
+    void engineStatusesReported(const QList<SearchEngineStatus> &statuses);
 
 private:
     void readSearchOutput();
