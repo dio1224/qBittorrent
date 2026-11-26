@@ -29,6 +29,9 @@
 
 #include "searchjobwidget.h"
 
+#include <algorithm>
+#include <cstdlib>
+
 #include <QApplication>
 #include <QClipboard>
 #include <QDesktopServices>
@@ -36,6 +39,7 @@
 #include <QKeyEvent>
 #include <QMenu>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QMessageBox>
 #include <QPalette>
 #include <QStandardItemModel>
@@ -51,11 +55,94 @@
 #include "gui/lineedit.h"
 #include "gui/uithememanager.h"
 #include "searchfilterbuilder.h"
+#include "searchsynonyms.h"
 #include "searchsortmodel.h"
 #include "ui_searchjobwidget.h"
 
 namespace
 {
+
+    // Results with a shorter (normalized) name than this are never merged by name
+    const int MIN_MERGE_NAME_LENGTH = 8;
+    const int NAME_KEY_LENGTH = 20;
+
+    // The Jackett plugin reports a missing API key or unreachable server as a fake result row
+    bool isPluginErrorRow(const SearchResult &result)
+    {
+        return result.fileName.startsWith(u"Jackett: ") && (result.nbSeeders < 0)
+            && result.descrLink.contains(u"Jackett", Qt::CaseInsensitive);
+    }
+
+    // "Blacked.23.05.13.Molly-Little [XC]" -> "blacked 23 05 13 molly little xc"
+    QString normalizedName(const QString &name)
+    {
+        QString out;
+        out.reserve(name.size());
+        bool pendingSpace = false;
+        for (const QChar c : name)
+        {
+            if (c.isLetterOrNumber())
+            {
+                if (pendingSpace && !out.isEmpty())
+                    out.append(u' ');
+                out.append(c.toLower());
+                pendingSpace = false;
+            }
+            else
+            {
+                pendingSpace = true;
+            }
+        }
+        return out;
+    }
+
+    QString base32ToHex(const QString &base32)
+    {
+        const QString alphabet = u"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"_s;
+        QByteArray bytes;
+        quint64 buffer = 0;
+        int bits = 0;
+        for (const QChar c : base32.toUpper())
+        {
+            const qsizetype value = alphabet.indexOf(c);
+            if (value < 0)
+                return {};
+            buffer = (buffer << 5) | static_cast<quint64>(value);
+            bits += 5;
+            if (bits >= 8)
+            {
+                bits -= 8;
+                bytes.append(static_cast<char>((buffer >> bits) & 0xFF));
+            }
+        }
+        return (bytes.size() == 20) ? QString::fromLatin1(bytes.toHex()) : QString();
+    }
+
+    // Info hash from a magnet link, or a 40-character hash inside a download URL
+    QString infoHashOf(const QString &url)
+    {
+        static const QRegularExpression btihRegex {u"btih:([0-9A-Za-z]{32,40})"_s, QRegularExpression::CaseInsensitiveOption};
+        if (const QRegularExpressionMatch match = btihRegex.match(url); match.hasMatch())
+        {
+            const QString hash = match.captured(1);
+            if (hash.size() == 40)
+                return hash.toLower();
+            if (hash.size() == 32)
+                return base32ToHex(hash);
+        }
+
+        static const QRegularExpression hexRegex {u"(?<![0-9A-Fa-f])[0-9A-Fa-f]{40}(?![0-9A-Fa-f])"_s};
+        if (const QRegularExpressionMatch match = hexRegex.match(url); match.hasMatch())
+            return match.captured(0).toLower();
+        return {};
+    }
+
+    bool sizesClose(const qlonglong a, const qlonglong b, const double tolerance)
+    {
+        if ((a <= 0) || (b <= 0))
+            return false;
+        return static_cast<double>(std::abs(a - b)) <= (tolerance * static_cast<double>(std::max(a, b)));
+    }
     enum DataRole
     {
         LinkVisitedRole = Qt::UserRole + 100
@@ -214,12 +301,6 @@ SearchJobWidget::SearchJobWidget(const QString &id, const QString &searchPattern
     appendSearchResults(searchResults);
 }
 
-SearchJobWidget::SearchJobWidget(const QString &id, SearchHandler *searchHandler, IGUIApplication *app, QWidget *parent)
-    : SearchJobWidget(id, app, parent)
-{
-    assignSearchHandler(searchHandler);
-}
-
 SearchJobWidget::~SearchJobWidget()
 {
     saveSettings();
@@ -298,37 +379,97 @@ LineEdit *SearchJobWidget::lineEditSearchResultsFilter() const
     return m_lineEditSearchResultsFilter;
 }
 
-void SearchJobWidget::assignSearchHandler(SearchHandler *searchHandler)
+void SearchJobWidget::runSearches(const QString &pattern, const QStringList &queries
+        , const QString &category, const QStringList &plugins)
 {
-    Q_ASSERT(searchHandler);
-    if (!searchHandler) [[unlikely]]
-        return;
+    // stop whatever this tab was running
+    m_pendingQueries.clear();
+    for (SearchHandler *handler : asConst(m_searchHandlers))
+    {
+        handler->disconnect(this);
+        handler->cancelSearch();
+        handler->deleteLater();
+    }
+    m_searchHandlers.clear();
 
     m_searchResults.clear();
-    m_searchListModel->removeRows(0, m_searchListModel->rowCount());
-    delete m_searchHandler;
+    clearResults();
 
-    m_searchHandler = searchHandler;
-    m_searchHandler->setParent(this);
-    connect(m_searchHandler, &SearchHandler::newSearchResults, this, &SearchJobWidget::appendSearchResults);
-    connect(m_searchHandler, &SearchHandler::searchFinished, this, &SearchJobWidget::searchFinished);
-    connect(m_searchHandler, &SearchHandler::searchFailed, this, &SearchJobWidget::searchFailed);
-
-    m_searchPattern = m_searchHandler->pattern();
-
+    m_searchPattern = pattern;
     m_proxyModel->setNameFilter(m_searchPattern);
+
+    m_queries = queries.isEmpty() ? QStringList {pattern} : queries;
+    m_pendingQueries = m_queries;
+    m_category = category;
+    m_plugins = plugins;
+    m_failedSearches = 0;
+    m_searchCancelled = false;
 
     updateResultsCount();
     setStatus(Status::Ongoing);
+    startPendingSearches();
+}
+
+void SearchJobWidget::startPendingSearches()
+{
+    // A few at a time, so the sites (and Cloudflare) aren't hit with every variant at once
+    const int maxRunning = 3;
+    while (!m_searchCancelled && !m_pendingQueries.isEmpty() && (m_searchHandlers.size() < maxRunning))
+    {
+        SearchHandler *handler = SearchPluginManager::instance()->startSearch(m_pendingQueries.takeFirst(), m_category, m_plugins);
+        handler->setParent(this);
+        m_searchHandlers.append(handler);
+        connect(handler, &SearchHandler::newSearchResults, this, &SearchJobWidget::appendSearchResults);
+        connect(handler, &SearchHandler::searchFinished, this, [this, handler]() { onSearchDone(handler, false); });
+        connect(handler, &SearchHandler::searchFailed, this, [this, handler]() { onSearchDone(handler, true); });
+    }
+}
+
+void SearchJobWidget::onSearchDone(SearchHandler *handler, const bool failed)
+{
+    // a failing process can report both "failed" and "finished"
+    if (!m_searchHandlers.removeOne(handler))
+        return;
+
+    handler->disconnect(this);
+    handler->deleteLater();
+    if (failed)
+        ++m_failedSearches;
+
+    startPendingSearches();
+
+    if (m_searchHandlers.isEmpty() && m_pendingQueries.isEmpty())
+    {
+        if (m_searchCancelled)
+            setStatus(Status::Aborted);
+        else if (m_failedSearches >= m_queries.size())
+            setStatus(Status::Error);
+        else if (m_noSearchResults)
+            setStatus(Status::NoResults);
+        else
+            setStatus(Status::Finished);
+    }
+    updateResultsCount();
 }
 
 void SearchJobWidget::cancelSearch()
 {
-    if (!m_searchHandler)
+    if (m_searchHandlers.isEmpty() && m_pendingQueries.isEmpty())
         return;
 
-    m_searchHandler->cancelSearch();
+    m_searchCancelled = true;
+    m_pendingQueries.clear();
+    const QList<SearchHandler *> running = m_searchHandlers;
+    for (SearchHandler *handler : running)
+        handler->cancelSearch();
     setStatus(Status::Aborted);
+}
+
+void SearchJobWidget::applySearchOptions()
+{
+    m_proxyModel->refreshSynonyms();
+    clearResults();
+    addResultsToModel(m_searchResults);
 }
 
 void SearchJobWidget::downloadTorrents(const AddTorrentOption option)
@@ -434,7 +575,7 @@ void SearchJobWidget::downloadTorrent(const QModelIndex &rowIndex, const AddTorr
     const QString torrentUrl = m_proxyModel->data(
                 m_proxyModel->index(rowIndex.row(), SearchSortModel::DL_LINK)).toString();
     const QString engineName = m_proxyModel->data(
-                m_proxyModel->index(rowIndex.row(), SearchSortModel::ENGINE_NAME)).toString();
+                m_proxyModel->index(rowIndex.row(), SearchSortModel::ENGINE_NAME), SearchSortModel::UnderlyingDataRole).toString();
 
     if (torrentUrl.startsWith(u"magnet:", Qt::CaseInsensitive))
     {
@@ -463,8 +604,26 @@ void SearchJobWidget::updateResultsCount()
 {
     const int totalResults = m_searchListModel->rowCount();
     const int filteredResults = m_proxyModel->rowCount();
-    m_ui->resultsLbl->setText(tr("Results (showing <i>%1</i> out of <i>%2</i>):", "i.e: Search results")
-                              .arg(filteredResults).arg(totalResults));
+    if (m_queries.size() > 1)
+    {
+        m_ui->resultsLbl->setText(tr("Results (showing <i>%1</i> out of <i>%2</i>, from %3 searches):")
+                                  .arg(filteredResults).arg(totalResults).arg(m_queries.size()));
+    }
+    else
+    {
+        m_ui->resultsLbl->setText(tr("Results (showing <i>%1</i> out of <i>%2</i>):", "i.e: Search results")
+                                  .arg(filteredResults).arg(totalResults));
+    }
+    QStringList tip;
+    if (m_queries.size() > 1)
+    {
+        tip.append(tr("Searches sent to the sites:"));
+        for (const QString &query : asConst(m_queries))
+            tip.append(u"  \u2022 "_s + query);
+    }
+    if (m_mergedCount > 0)
+        tip.append(tr("%1 duplicate listings merged into other rows").arg(m_mergedCount));
+    m_ui->resultsLbl->setToolTip(tip.join(u'\n'));
 
     m_noSearchResults = (totalResults == 0);
     emit resultsCountUpdated();
@@ -649,54 +808,218 @@ void SearchJobWidget::displayColumnHeaderMenu()
     menu->popup(QCursor::pos());
 }
 
-void SearchJobWidget::searchFinished(bool cancelled)
-{
-    if (cancelled)
-        setStatus(Status::Aborted);
-    else if (m_noSearchResults)
-        setStatus(Status::NoResults);
-    else
-        setStatus(Status::Finished);
-}
-
-void SearchJobWidget::searchFailed([[maybe_unused]] const QString &errorMessage)
-{
-    setStatus(Status::Error);
-}
-
 void SearchJobWidget::appendSearchResults(const QList<SearchResult> &results)
 {
+    QList<SearchResult> kept;
+    kept.reserve(results.size());
     for (const SearchResult &result : results)
     {
-        // Add item to search result list
-        int row = m_searchListModel->rowCount();
-        m_searchListModel->insertRow(row);
+        if (!isPluginErrorRow(result))
+            kept.append(result);
+    }
+    m_searchResults.append(kept);
+    addResultsToModel(kept);
+}
 
-        const auto setModelData = [this, row] (const int column, const QString &displayData
-                , const QVariant &underlyingData, const Qt::Alignment textAlignmentData = {})
+void SearchJobWidget::addResultsToModel(const QList<SearchResult> &results)
+{
+    const bool merge = SearchSynonyms::mergeDuplicates();
+    for (const SearchResult &result : results)
+    {
+        const QString normName = normalizedName(result.fileName);
+        const QString infoHash = infoHashOf(result.fileUrl);
+        if (merge)
         {
-            const QMap<int, QVariant> data =
+            if (const int row = findDuplicateRow(normName, infoHash, result.fileSize); row >= 0)
             {
-                {Qt::DisplayRole, displayData},
-                {SearchSortModel::UnderlyingDataRole, underlyingData},
-                {Qt::TextAlignmentRole, QVariant {textAlignmentData}}
-            };
-            m_searchListModel->setItemData(m_searchListModel->index(row, column), data);
-        };
+                mergeIntoRow(row, result, normName, infoHash);
+                continue;
+            }
+        }
+        addResultRow(result, normName, infoHash);
+    }
+    updateResultsCount();
+}
 
-        setModelData(SearchSortModel::NAME, result.fileName, result.fileName);
-        setModelData(SearchSortModel::DL_LINK, result.fileUrl, result.fileUrl);
-        setModelData(SearchSortModel::ENGINE_NAME, result.engineName, result.engineName);
-        setModelData(SearchSortModel::ENGINE_URL, result.siteUrl, result.siteUrl);
-        setModelData(SearchSortModel::DESC_LINK, result.descrLink, result.descrLink);
-        setModelData(SearchSortModel::SIZE, Utils::Misc::friendlyUnit(result.fileSize), result.fileSize, (Qt::AlignRight | Qt::AlignVCenter));
-        setModelData(SearchSortModel::SEEDS, QString::number(result.nbSeeders), result.nbSeeders, (Qt::AlignRight | Qt::AlignVCenter));
-        setModelData(SearchSortModel::LEECHES, QString::number(result.nbLeechers), result.nbLeechers, (Qt::AlignRight | Qt::AlignVCenter));
-        setModelData(SearchSortModel::PUB_DATE, QLocale().toString(result.pubDate.toLocalTime(), QLocale::ShortFormat), result.pubDate);
+void SearchJobWidget::addResultRow(const SearchResult &result, const QString &normName, const QString &infoHash)
+{
+    const int row = m_searchListModel->rowCount();
+    m_searchListModel->insertRow(row);
+
+    const auto setModelData = [this, row] (const int column, const QString &displayData
+            , const QVariant &underlyingData, const Qt::Alignment textAlignmentData = {})
+    {
+        const QMap<int, QVariant> data =
+        {
+            {Qt::DisplayRole, displayData},
+            {SearchSortModel::UnderlyingDataRole, underlyingData},
+            {Qt::TextAlignmentRole, QVariant {textAlignmentData}}
+        };
+        m_searchListModel->setItemData(m_searchListModel->index(row, column), data);
+    };
+
+    setModelData(SearchSortModel::NAME, result.fileName, result.fileName);
+    setModelData(SearchSortModel::DL_LINK, result.fileUrl, result.fileUrl);
+    setModelData(SearchSortModel::ENGINE_NAME, result.engineName, result.engineName);
+    setModelData(SearchSortModel::ENGINE_URL, result.siteUrl, result.siteUrl);
+    setModelData(SearchSortModel::DESC_LINK, result.descrLink, result.descrLink);
+    setModelData(SearchSortModel::SIZE, Utils::Misc::friendlyUnit(result.fileSize), result.fileSize, (Qt::AlignRight | Qt::AlignVCenter));
+    setModelData(SearchSortModel::SEEDS, QString::number(result.nbSeeders), result.nbSeeders, (Qt::AlignRight | Qt::AlignVCenter));
+    setModelData(SearchSortModel::LEECHES, QString::number(result.nbLeechers), result.nbLeechers, (Qt::AlignRight | Qt::AlignVCenter));
+    setModelData(SearchSortModel::PUB_DATE, QLocale().toString(result.pubDate.toLocalTime(), QLocale::ShortFormat), result.pubDate);
+
+    RowInfo info;
+    info.normName = normName;
+    info.infoHash = infoHash;
+    info.size = result.fileSize;
+    info.seeds = result.nbSeeders;
+    info.engine = result.engineName;
+    info.sources = {result.engineName};
+    info.sourceSeeds = {result.nbSeeders};
+    info.listings = {result.engineName + u'\n' + result.fileUrl};
+    m_rowInfo.append(info);
+
+    if (!infoHash.isEmpty())
+        m_rowByHash.insert(infoHash, row);
+    if (normName.size() >= MIN_MERGE_NAME_LENGTH)
+        m_rowsByNameKey[normName.left(NAME_KEY_LENGTH)].append(row);
+}
+
+int SearchJobWidget::findDuplicateRow(const QString &normName, const QString &infoHash, const qlonglong size) const
+{
+    if (!infoHash.isEmpty())
+    {
+        if (const auto it = m_rowByHash.constFind(infoHash); it != m_rowByHash.cend())
+            return it.value();
     }
 
-    m_searchResults.append(results);
-    updateResultsCount();
+    if (normName.size() < MIN_MERGE_NAME_LENGTH)
+        return -1;
+
+    for (const int row : m_rowsByNameKey.value(normName.left(NAME_KEY_LENGTH)))
+    {
+        const RowInfo &info = m_rowInfo.at(row);
+        // different torrent files are kept apart, even under the same name (fakes copy names)
+        if (!infoHash.isEmpty() && !info.infoHash.isEmpty() && (info.infoHash != infoHash))
+            continue;
+
+        if (info.normName == normName)
+        {
+            if ((size <= 0) || (info.size <= 0) || sizesClose(info.size, size, 0.08))
+                return row;
+            continue;
+        }
+
+        // one site cut the name short: "...MP4-P2P [X" vs "...MP4-P2P [XC]"
+        const bool newIsShorter = (normName.size() < info.normName.size());
+        const QString &shorter = newIsShorter ? normName : info.normName;
+        const QString &longer = newIsShorter ? info.normName : normName;
+        if ((shorter.size() >= 25) && ((shorter.size() * 10) >= (longer.size() * 6))
+            && longer.startsWith(shorter) && sizesClose(info.size, size, 0.03))
+        {
+            return row;
+        }
+    }
+    return -1;
+}
+
+void SearchJobWidget::mergeIntoRow(const int row, const SearchResult &result, const QString &normName, const QString &infoHash)
+{
+    RowInfo &info = m_rowInfo[row];
+    ++m_mergedCount;
+
+    // the same listing, found again by another of this tab's searches
+    const QString listingKey = result.engineName + u'\n' + result.fileUrl;
+    if (info.listings.contains(listingKey))
+        return;
+    info.listings.insert(listingKey);
+    info.sources.append(result.engineName);
+    info.sourceSeeds.append(result.nbSeeders);
+
+    if (!infoHash.isEmpty() && info.infoHash.isEmpty())
+    {
+        info.infoHash = infoHash;
+        m_rowByHash.insert(infoHash, row);
+    }
+
+    const auto setData = [this, row](const int column, const QString &display, const QVariant &underlying)
+    {
+        const QModelIndex index = m_searchListModel->index(row, column);
+        m_searchListModel->setData(index, display, Qt::DisplayRole);
+        m_searchListModel->setData(index, underlying, SearchSortModel::UnderlyingDataRole);
+    };
+
+    // keep the complete name when a site cut it short
+    if ((normName.size() > info.normName.size()) && normName.startsWith(info.normName))
+    {
+        setData(SearchSortModel::NAME, result.fileName, result.fileName);
+        info.normName = normName;
+    }
+
+    // the best-seeded listing is the one used for downloading
+    if (result.nbSeeders > info.seeds)
+    {
+        info.seeds = result.nbSeeders;
+        info.engine = result.engineName;
+        setData(SearchSortModel::DL_LINK, result.fileUrl, result.fileUrl);
+        setData(SearchSortModel::ENGINE_URL, result.siteUrl, result.siteUrl);
+        setData(SearchSortModel::DESC_LINK, result.descrLink, result.descrLink);
+        setData(SearchSortModel::SEEDS, QString::number(result.nbSeeders), result.nbSeeders);
+        setData(SearchSortModel::LEECHES, QString::number(result.nbLeechers), result.nbLeechers);
+        if (result.fileSize > 0)
+        {
+            info.size = result.fileSize;
+            setData(SearchSortModel::SIZE, Utils::Misc::friendlyUnit(result.fileSize), result.fileSize);
+        }
+        if (result.pubDate.isValid())
+            setData(SearchSortModel::PUB_DATE, QLocale().toString(result.pubDate.toLocalTime(), QLocale::ShortFormat), result.pubDate);
+    }
+
+    updateSourcesDisplay(row);
+}
+
+void SearchJobWidget::updateSourcesDisplay(const int row)
+{
+    const RowInfo &info = m_rowInfo.at(row);
+    const QModelIndex index = m_searchListModel->index(row, SearchSortModel::ENGINE_NAME);
+
+    QStringList sites;
+    for (const QString &site : info.sources)
+    {
+        if (!sites.contains(site))
+            sites.append(site);
+    }
+    const qsizetype otherSites = sites.size() - 1;
+    const qsizetype listings = info.sources.size();
+
+    QString display = info.engine;
+    if (otherSites > 0)
+        display = tr("%1 +%2").arg(info.engine).arg(otherSites);
+    else if (listings > 1)
+        display = tr("%1 (%2 uploads)").arg(info.engine).arg(listings);
+
+    m_searchListModel->setData(index, display, Qt::DisplayRole);
+    m_searchListModel->setData(index, info.engine, SearchSortModel::UnderlyingDataRole);
+    m_searchListModel->setData(index, sites, SearchSortModel::SourcesRole);
+
+    QString tooltip;
+    if (listings > 1)
+    {
+        QStringList lines {tr("Listed %1 times. Downloads use the one with the most seeders.").arg(listings)};
+        for (qsizetype i = 0; i < listings; ++i)
+            lines.append(tr("%1: %2 seeders").arg(info.sources[i]).arg(info.sourceSeeds[i]));
+        tooltip = lines.join(u'\n');
+    }
+    m_searchListModel->setData(index, tooltip, Qt::ToolTipRole);
+}
+
+void SearchJobWidget::clearResults()
+{
+    m_searchListModel->removeRows(0, m_searchListModel->rowCount());
+    m_rowInfo.clear();
+    m_rowByHash.clear();
+    m_rowsByNameKey.clear();
+    m_mergedCount = 0;
 }
 
 void SearchJobWidget::keyPressEvent(QKeyEvent *event)

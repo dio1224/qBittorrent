@@ -28,16 +28,19 @@
 
 #pragma once
 
+#include <functional>
+
 #include <QObject>
 
 class QMenu;
 class QWidget;
 
 // The "Extras" menu on the Search tab: Cloudflare helper setup, a fresh
-// Cloudflare pass, and the RuTracker login.
+// Cloudflare pass, the RuTracker login, and search options (synonyms,
+// duplicate merging, how many searches run).
 namespace DioExtrasMenu
 {
-    QMenu *create(QWidget *parent);
+    QMenu *create(QWidget *parent, const std::function<void ()> &onSearchOptionsChanged = {});
 
     // Asks once whether to set up the Cloudflare helper if it's missing.
     void offerHelperSetupOnce(QWidget *parent);
@@ -45,4 +48,5 @@ namespace DioExtrasMenu
     void setUpHelper(QWidget *parent);
     void refreshPass(QWidget *parent);
     void editRuTrackerLogin(QWidget *parent);
+    void editSearchOptions(QWidget *parent, const std::function<void ()> &onChanged);
 }

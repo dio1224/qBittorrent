@@ -32,6 +32,7 @@
 #include <cmath>
 
 #include "base/global.h"
+#include "searchsynonyms.h"
 
 SearchSortModel::SearchSortModel(QObject *parent)
     : base(parent)
@@ -67,7 +68,8 @@ void SearchSortModel::setNameFilter(const QString &searchTerm)
     if ((searchTerm.length() > 2) && searchTerm.startsWith(u'"') && searchTerm.endsWith(u'"'))
         m_searchTermWords = QStringList(m_searchTerm.sliced(1, (m_searchTerm.length() - 2)));
     else
-        m_searchTermWords = searchTerm.split(u' ', Qt::SkipEmptyParts);
+        m_searchTermWords = SearchSynonyms::splitTerms(searchTerm);
+    compileSearchTermWords();
 
     endFilterChange(Direction::Rows);
 #else
@@ -75,7 +77,8 @@ void SearchSortModel::setNameFilter(const QString &searchTerm)
     if ((searchTerm.length() > 2) && searchTerm.startsWith(u'"') && searchTerm.endsWith(u'"'))
         m_searchTermWords = QStringList(m_searchTerm.sliced(1, (m_searchTerm.length() - 2)));
     else
-        m_searchTermWords = searchTerm.split(u' ', Qt::SkipEmptyParts);
+        m_searchTermWords = SearchSynonyms::splitTerms(searchTerm);
+    compileSearchTermWords();
 
     invalidateRowsFilter();
 #endif
@@ -188,8 +191,27 @@ bool SearchSortModel::lessThan(const QModelIndex &left, const QModelIndex &right
     };
 }
 
+void SearchSortModel::compileSearchTermWords()
+{
+    m_searchTermRegexes.clear();
+    for (const QString &word : asConst(m_searchTermWords))
+    {
+        m_searchTermRegexes.append(QRegularExpression(SearchSynonyms::namePattern(word)
+            , QRegularExpression::CaseInsensitiveOption | QRegularExpression::UseUnicodePropertiesOption));
+    }
+}
+
+void SearchSortModel::refreshSynonyms()
+{
+    compileSearchTermWords();
+    m_filterRules = compileRules(m_rawFilterRules);
+    m_localRules = compileRules(m_rawLocalRules);
+    invalidateRowsFilter();
+}
+
 void SearchSortModel::setFilterRules(const QList<FilterRule> &rules, const bool matchAll)
 {
+    m_rawFilterRules = rules;
     m_filterRules = compileRules(rules);
     m_filterRulesMatchAll = matchAll;
     invalidateRowsFilter();
@@ -197,6 +219,7 @@ void SearchSortModel::setFilterRules(const QList<FilterRule> &rules, const bool 
 
 void SearchSortModel::setLocalFilterRules(const QList<FilterRule> &rules, const bool matchAll)
 {
+    m_rawLocalRules = rules;
     m_localRules = compileRules(rules);
     m_localRulesMatchAll = matchAll;
     invalidateRowsFilter();
@@ -221,7 +244,10 @@ QList<SearchSortModel::CompiledRule> SearchSortModel::compileRules(const QList<F
         case Field::Name:
         case Field::Engine:
             {
-                const QString esc = QRegularExpression::escape(text);
+                // Names: spaces/dots/dashes are interchangeable and synonyms count
+                // ("2160p" also matches "4K" and "UHD"). Engines: plain text.
+                const QString esc = (rule.field == Field::Name)
+                    ? SearchSynonyms::namePattern(text) : QRegularExpression::escape(text);
                 const QString notWordChar = u"[\\p{L}\\p{N}]"_s;
                 QString pattern;
                 switch (rule.op)
@@ -314,7 +340,27 @@ bool SearchSortModel::ruleMatches(const int sourceRow, const QModelIndex &source
     case Field::Name:
     case Field::Engine:
         {
-            const bool found = c.regex.match(value((c.rule.field == Field::Name) ? NAME : ENGINE_NAME).toString()).hasMatch();
+            QString subject;
+            if (c.rule.field == Field::Name)
+            {
+                subject = value(NAME).toString();
+            }
+            else
+            {
+                // merged rows carry every site that listed them
+                const QVariant sources = model->data(model->index(sourceRow, ENGINE_NAME, sourceParent), SourcesRole);
+                subject = sources.isValid() ? sources.toStringList().join(u'\n') : value(ENGINE_NAME).toString();
+            }
+            bool found = false;
+            if (c.rule.field == Field::Engine)
+            {
+                for (const QString &line : subject.split(u'\n'))
+                    found = found || c.regex.match(line).hasMatch();
+            }
+            else
+            {
+                found = c.regex.match(subject).hasMatch();
+            }
             switch (c.rule.op)
             {
             case Op::DoesNotContain:
@@ -376,9 +422,9 @@ bool SearchSortModel::filterAcceptsRow(const int sourceRow, const QModelIndex &s
     if (m_isNameFilterEnabled && !m_searchTerm.isEmpty())
     {
         const QString name = sourceModel->data(sourceModel->index(sourceRow, NAME, sourceParent), UnderlyingDataRole).toString();
-        for (const QString &word : asConst(m_searchTermWords))
+        for (const QRegularExpression &word : asConst(m_searchTermRegexes))
         {
-            if (!name.contains(word, Qt::CaseInsensitive))
+            if (!word.match(name).hasMatch())
                 return false;
         }
     }

@@ -65,8 +65,8 @@ public:
     QList<SearchSortModel::FilterRule> rules() const;
     bool matchAll() const;
 
-    // Words from "Name contains" rules that should be added to the search
-    // itself (only when the rules must all match and the option is on)
+    // Words from "Name contains" rules to send to the sites (empty when the
+    // option is off). With matchAll() they go together, otherwise one search each.
     QStringList searchWords() const;
 
 signals:

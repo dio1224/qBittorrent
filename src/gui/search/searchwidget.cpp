@@ -49,6 +49,7 @@
 #include <QObject>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSet>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
 #include <QStringList>
@@ -74,6 +75,7 @@
 #include "searchfilterbuilder.h"
 #include "searchjobwidget.h"
 #include "searchpluginselectdialog.h"
+#include "searchsynonyms.h"
 #include "ui_searchwidget.h"
 
 const int HISTORY_FILE_MAX_SIZE = 10 * 1024 * 1024;
@@ -439,7 +441,7 @@ SearchWidget::SearchWidget(IGUIApplication *app, QWidget *parent)
 
     // Extras: Cloudflare helper and RuTracker login for the bundled plugins
     auto *extrasButton = new QPushButton(tr("Extras"), this);
-    extrasButton->setMenu(DioExtrasMenu::create(this));
+    extrasButton->setMenu(DioExtrasMenu::create(this, [this]() { applySearchOptionsToTabs(); }));
     m_ui->layout2->addWidget(extrasButton);
     QMetaObject::invokeMethod(this, [this]() { DioExtrasMenu::offerHelperSetupOnce(this); }, Qt::QueuedConnection);
     connect(m_ui->searchButton, &QPushButton::clicked, this, &SearchWidget::searchButtonClicked);
@@ -935,20 +937,10 @@ void SearchWidget::searchButtonClicked()
 
     qDebug("Search with category: %s", qUtf8Printable(selectedCategory()));
 
-    // Add the filter's required words to what the sites search for
-    QString sitePattern = pattern;
-    for (const QString &word : m_filterBuilder->searchWords())
-    {
-        if (!sitePattern.contains(word, Qt::CaseInsensitive))
-            sitePattern += u' ' + word;
-    }
-
-    // Launch search
-    auto *searchHandler = SearchPluginManager::instance()->startSearch(sitePattern, selectedCategory(), selectedPlugins());
-
     // Tab Addition
     const QString newTabID = generateTabID();
-    auto *newTab = new SearchJobWidget(newTabID, searchHandler, app(), this);
+    auto *newTab = new SearchJobWidget(newTabID, app(), this);
+    newTab->runSearches(pattern, planQueries(pattern), selectedCategory(), selectedPlugins());
     const int tabIndex = addTab(newTabID, newTab);
     m_ui->tabWidget->setTabToolTip(tabIndex, newTab->statusTip());
     m_ui->tabWidget->setTabIcon(tabIndex, UIThemeManager::instance()->getIcon(statusIconName(newTab->status())));
@@ -1019,8 +1011,108 @@ void SearchWidget::refreshTab(SearchJobWidget *searchJobWidget)
     }
 
     // Re-launch search
-    auto *searchHandler = SearchPluginManager::instance()->startSearch(searchJobWidget->searchPattern(), selectedCategory(), selectedPlugins());
-    searchJobWidget->assignSearchHandler(searchHandler);
+    const QString pattern = searchJobWidget->searchPattern();
+    searchJobWidget->runSearches(pattern, planQueries(pattern), selectedCategory(), selectedPlugins());
+}
+
+QStringList SearchWidget::planQueries(const QString &pattern) const
+{
+    const QStringList baseTerms = SearchSynonyms::splitTerms(pattern);
+    const QStringList words = m_filterBuilder->searchWords();
+
+    // "all rules": the words go together; "any rule": one search per word
+    QList<QStringList> wordSets;
+    if (!words.isEmpty())
+    {
+        if (m_filterBuilder->matchAll() || (words.size() == 1))
+        {
+            wordSets.append(words);
+        }
+        else
+        {
+            for (const QString &word : words)
+                wordSets.append(QStringList {word});
+        }
+    }
+
+    const auto hasTerm = [](const QStringList &terms, const QString &term)
+    {
+        const QString key = SearchSynonyms::normalize(term);
+        for (const QString &t : terms)
+        {
+            if (SearchSynonyms::normalize(t) == key)
+                return true;
+        }
+        return false;
+    };
+
+    QList<QStringList> specific;
+    for (const QStringList &wordSet : asConst(wordSets))
+    {
+        QStringList terms = baseTerms;
+        for (const QString &word : wordSet)
+        {
+            for (const QString &wordTerm : SearchSynonyms::splitTerms(word))
+            {
+                if (!hasTerm(terms, wordTerm))
+                    terms.append(wordTerm);
+            }
+        }
+        specific.append(terms);
+    }
+
+    const int maxSearches = SearchSynonyms::maxSearches();
+    QStringList queries;
+    QSet<QString> seen;
+    const auto add = [&](const QStringList &terms)
+    {
+        if (queries.size() >= maxSearches)
+            return;
+        // word order doesn't matter to the sites, so "a b" and "b a" count once
+        QStringList key;
+        for (const QString &term : terms)
+            key.append(SearchSynonyms::normalize(term));
+        key.sort();
+        const QString keyText = key.join(u' ');
+        if (keyText.isEmpty() || seen.contains(keyText))
+            return;
+        seen.insert(keyText);
+        queries.append(terms.join(u' '));
+    };
+
+    // 1. the search with the filter's words, 2. the typed search (catches sites that
+    // match whole words only, so "blacked" misses "BlackedRaw"), 3. synonym variants
+    for (const QStringList &terms : asConst(specific))
+        add(terms);
+    add(baseTerms);
+
+    QList<QStringList> variantSources = specific;
+    variantSources.append(baseTerms);
+    const QList<SearchSynonyms::Group> &groups = SearchSynonyms::groups();
+    for (const QStringList &terms : asConst(variantSources))
+    {
+        for (qsizetype i = 0; i < terms.size(); ++i)
+        {
+            const int group = SearchSynonyms::groupOf(terms[i]);
+            if (group < 0)
+                continue;
+            for (const QString &variant : groups[group].variants)
+            {
+                if (SearchSynonyms::normalize(variant) == SearchSynonyms::normalize(terms[i]))
+                    continue;
+                QStringList changed = terms;
+                changed[i] = variant;
+                add(changed);
+            }
+        }
+    }
+    return queries;
+}
+
+void SearchWidget::applySearchOptionsToTabs()
+{
+    for (SearchJobWidget *tab : asConst(m_tabWidgets))
+        tab->applySearchOptions();
 }
 
 void SearchWidget::DataStorage::loadSession(const bool withSearchResults)

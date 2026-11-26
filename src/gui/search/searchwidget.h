@@ -31,6 +31,7 @@
 #pragma once
 
 #include <QPointer>
+#include <QStringList>
 #include <QSet>
 #include <QWidget>
 
@@ -79,6 +80,9 @@ private:
     void closeTab(int index);
     void closeAllTabs();
     void refreshTab(SearchJobWidget *searchJobWidget);
+    // The site searches for one search: with the filter's words, as typed, and synonym variants
+    QStringList planQueries(const QString &pattern) const;
+    void applySearchOptionsToTabs();
     void showTabMenu(int index);
 
     void selectMultipleBox(int index);

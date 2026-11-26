@@ -58,7 +58,8 @@ public:
 
     enum SearchDataRole
     {
-        UnderlyingDataRole = Qt::UserRole
+        UnderlyingDataRole = Qt::UserRole,
+        SourcesRole                         // QStringList: every site that listed a merged result
     };
 
     // One condition from the filter builder
@@ -115,6 +116,8 @@ public:
     void setFilterRules(const QList<FilterRule> &rules, bool matchAll);
     //! \brief Extra rules for one results tab, applied on top of the search's rules
     void setLocalFilterRules(const QList<FilterRule> &rules, bool matchAll);
+    //! \brief Recompiles the name filter and rules after the synonym list changed
+    void refreshSynonyms();
 
     void enableNameFilter(bool enabled);
     void setNameFilter(const QString &searchTerm = {});
@@ -160,6 +163,7 @@ private:
 
     bool ruleMatches(int sourceRow, const QModelIndex &sourceParent, const CompiledRule &rule) const;
     QList<CompiledRule> compileRules(const QList<FilterRule> &rules) const;
+    void compileSearchTermWords();
     bool rulesPass(const QList<CompiledRule> &rules, bool matchAll, int sourceRow, const QModelIndex &sourceParent) const;
 
     QList<CompiledRule> m_filterRules;
@@ -169,6 +173,9 @@ private:
     bool m_isNameFilterEnabled = false;
     QString m_searchTerm;
     QStringList m_searchTermWords;
+    QList<QRegularExpression> m_searchTermRegexes;
+    QList<FilterRule> m_rawFilterRules;
+    QList<FilterRule> m_rawLocalRules;
     int m_minSeeds = 0, m_maxSeeds = -1;
     int m_minLeeches = 0, m_maxLeeches = -1;
     qint64 m_minSize = 0, m_maxSize = -1;

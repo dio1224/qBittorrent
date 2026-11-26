@@ -169,8 +169,10 @@ SearchFilterBuilder::SearchFilterBuilder(QWidget *parent, const Mode mode)
     header->addStretch();
 
     m_sendWords = new QCheckBox(tr("Include required words in the search"), this);
-    m_sendWords->setToolTip(tr("Adds the words from \"Name contains\" rules to what's sent to the sites, so they return those releases "
-        "instead of only their top results for the title. Other rules filter the results here."));
+    m_sendWords->setToolTip(tr("Adds the words from \"Name contains\" rules to the searches sent to the sites, so they return "
+        "those releases instead of only their top results for the title. With \"all rules\" the words are searched together; "
+        "with \"any rule\" each word gets its own search. The plain search always runs too, and synonyms "
+        "(2160p, 4K, UHD...) get their own searches. Other rules filter the results here."));
     connect(m_sendWords, &QCheckBox::toggled, this, &SearchFilterBuilder::onChanged);
     header->addWidget(m_sendWords);
 
@@ -203,7 +205,7 @@ bool SearchFilterBuilder::matchAll() const
 QStringList SearchFilterBuilder::searchWords() const
 {
     QStringList words;
-    if ((m_mode != Mode::Search) || !m_sendWords->isChecked() || (!matchAll() && (m_rows.size() > 1)))
+    if ((m_mode != Mode::Search) || !m_sendWords->isChecked())
         return words;
     for (const Row &row : m_rows)
     {
@@ -449,12 +451,6 @@ void SearchFilterBuilder::updateHeaderVisibility()
     m_sendWords->setVisible(searchMode && !m_rows.isEmpty());
     m_searchAgainButton->setVisible(searchMode && !m_rows.isEmpty());
 
-    // With "any rule (OR)", the words can't be sent: a site search for
-    // "title A B" only returns releases with both words
-    const bool canSend = matchAll() || (m_rows.size() <= 1);
-    m_sendWords->setEnabled(canSend);
-    m_sendWords->setText(canSend ? tr("Include required words in the search")
-        : tr("Include required words in the search (needs \"all rules\")"));
 }
 
 void SearchFilterBuilder::onChanged()

@@ -325,6 +325,11 @@ void KeyValueDataStorage::Worker::run()
     {
         auto db = QSqlDatabase::database(connectionName, false);
 
+        // If the database can't be opened (for example the SQLite driver is missing),
+        // keep answering jobs against the closed database. Each one then fails on its own
+        // and fetches return an empty value, instead of callers waiting forever.
+        bool dbUsable = true;
+
         {
             const QMutexLocker jobsMutexLocker {&m_jobsMutex};
             if (!m_jobs.empty())
@@ -333,7 +338,7 @@ void KeyValueDataStorage::Worker::run()
                 if (!initDB(db))
                 {
                     m_dbLock.unlock();
-                    return;
+                    dbUsable = false;
                 }
             }
         }
@@ -363,11 +368,14 @@ void KeyValueDataStorage::Worker::run()
                     break;
                 }
 
-                m_dbLock.lockForWrite();
-                if (!initDB(db))
+                if (dbUsable)
                 {
-                    m_dbLock.unlock();
-                    break;
+                    m_dbLock.lockForWrite();
+                    if (!initDB(db))
+                    {
+                        m_dbLock.unlock();
+                        dbUsable = false;
+                    }
                 }
             }
             std::unique_ptr<Job> job = std::move(m_jobs.front());
@@ -375,7 +383,8 @@ void KeyValueDataStorage::Worker::run()
             jobsMutexLocker.unlock();
 
             job->perform(db);
-            ++transactedJobsCount;
+            if (dbUsable)
+                ++transactedJobsCount;
         }
     }
 

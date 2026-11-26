@@ -29,6 +29,9 @@
 
 #pragma once
 
+#include <QHash>
+#include <QSet>
+#include <QStringList>
 #include <QWidget>
 
 #include "base/settingvalue.h"
@@ -79,7 +82,7 @@ public:
     };
 
     SearchJobWidget(const QString &id, const QString &searchPattern, const QList<SearchResult> &searchResults, IGUIApplication *app, QWidget *parent = nullptr);
-    SearchJobWidget(const QString &id, SearchHandler *searchHandler, IGUIApplication *app, QWidget *parent = nullptr);
+    SearchJobWidget(const QString &id, IGUIApplication *app, QWidget *parent = nullptr);
     ~SearchJobWidget() override;
 
     QString id() const;
@@ -89,7 +92,11 @@ public:
     int visibleResultsCount() const;
     LineEdit *lineEditSearchResultsFilter() const;
 
-    void assignSearchHandler(SearchHandler *searchHandler);
+    // Runs several site searches into this tab: the typed search, the search with
+    // the filter's words, and synonym variants. A few run at a time.
+    void runSearches(const QString &pattern, const QStringList &queries, const QString &category, const QStringList &plugins);
+    // The synonym list or duplicate merging changed
+    void applySearchOptions();
     void setFilterRules(const QList<SearchSortModel::FilterRule> &rules, bool matchAll);
     void cancelSearch();
 
@@ -104,7 +111,17 @@ private slots:
     void displayColumnHeaderMenu();
 
 private:
-    SearchJobWidget(const QString &id, IGUIApplication *app, QWidget *parent);
+    struct RowInfo
+    {
+        QString normName;           // lowercase, punctuation folded to spaces
+        QString infoHash;
+        qlonglong size = 0;
+        qlonglong seeds = -1;       // of the listing used for downloading
+        QString engine;             // the listing used for downloading
+        QStringList sources;        // site of every distinct listing
+        QList<qlonglong> sourceSeeds;
+        QSet<QString> listings;     // site + download link, to spot the same listing found by several searches
+    };
 
     void loadSettings();
     void saveSettings() const;
@@ -115,9 +132,15 @@ private:
     void showFilterContextMenu();
     void contextMenuEvent(QContextMenuEvent *event) override;
     void onItemDoubleClicked(const QModelIndex &index);
-    void searchFinished(bool cancelled);
-    void searchFailed(const QString &errorMessage);
+    void startPendingSearches();
+    void onSearchDone(SearchHandler *handler, bool failed);
     void appendSearchResults(const QList<SearchResult> &results);
+    void addResultsToModel(const QList<SearchResult> &results);
+    void addResultRow(const SearchResult &result, const QString &normName, const QString &infoHash);
+    int findDuplicateRow(const QString &normName, const QString &infoHash, qlonglong size) const;
+    void mergeIntoRow(int row, const SearchResult &result, const QString &normName, const QString &infoHash);
+    void updateSourcesDisplay(int row);
+    void clearResults();
     void updateResultsCount();
     void setStatus(Status value);
     void downloadTorrent(const QModelIndex &rowIndex, AddTorrentOption option = AddTorrentOption::Default);
@@ -142,7 +165,17 @@ private:
     QString m_searchPattern;
     QList<SearchResult> m_searchResults;
     Ui::SearchJobWidget *m_ui = nullptr;
-    SearchHandler *m_searchHandler = nullptr;
+    QList<SearchHandler *> m_searchHandlers;    // running
+    QStringList m_pendingQueries;
+    QStringList m_queries;
+    QString m_category;
+    QStringList m_plugins;
+    int m_failedSearches = 0;
+    bool m_searchCancelled = false;
+    QList<RowInfo> m_rowInfo;                   // one per source-model row
+    QHash<QString, int> m_rowByHash;
+    QHash<QString, QList<int>> m_rowsByNameKey;  // first 20 chars of the normalized name
+    int m_mergedCount = 0;
     QStandardItemModel *m_searchListModel = nullptr;
     SearchSortModel *m_proxyModel = nullptr;
     LineEdit *m_lineEditSearchResultsFilter = nullptr;

@@ -28,6 +28,16 @@
 
 #include "dioextrasmenu.h"
 
+#include <QCheckBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFontDatabase>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSpinBox>
+#include <QVBoxLayout>
 #include <QCoreApplication>
 #include <QFile>
 #include <QInputDialog>
@@ -43,6 +53,7 @@
 #include "base/search/searchpluginmanager.h"
 #include "base/settingsstorage.h"
 #include "base/utils/foreignapps.h"
+#include "searchsynonyms.h"
 
 namespace
 {
@@ -84,9 +95,14 @@ namespace
     }
 }
 
-QMenu *DioExtrasMenu::create(QWidget *parent)
+QMenu *DioExtrasMenu::create(QWidget *parent, const std::function<void ()> &onSearchOptionsChanged)
 {
     auto *menu = new QMenu(parent);
+    menu->addAction(QObject::tr("Search options (synonyms, duplicates)..."), parent, [parent, onSearchOptionsChanged]()
+    {
+        editSearchOptions(parent, onSearchOptionsChanged);
+    });
+    menu->addSeparator();
     menu->addAction(QObject::tr("Set up Cloudflare helper..."), parent, [parent]() { setUpHelper(parent); });
     menu->addAction(QObject::tr("Get a fresh Cloudflare pass..."), parent, [parent]() { refreshPass(parent); });
     menu->addSeparator();
@@ -223,4 +239,55 @@ void DioExtrasMenu::editRuTrackerLogin(QWidget *parent)
         QMessageBox::information(parent, QObject::tr("RuTracker login"), QObject::tr("Saved. It's stored only in the RuTracker plugin on this Mac."));
     else
         QMessageBox::warning(parent, QObject::tr("RuTracker login"), QObject::tr("Couldn't save the login."));
+}
+
+void DioExtrasMenu::editSearchOptions(QWidget *parent, const std::function<void ()> &onChanged)
+{
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QObject::tr("Search options"));
+    auto *layout = new QVBoxLayout(&dialog);
+
+    auto *mergeBox = new QCheckBox(QObject::tr("Show a release listed by several sites as one row"), &dialog);
+    mergeBox->setToolTip(QObject::tr("Rows with the same torrent, or the same name and size, are merged. "
+        "The Engine column shows how many sites listed it, and downloads use the listing with the most seeders."));
+    mergeBox->setChecked(SearchSynonyms::mergeDuplicates());
+    layout->addWidget(mergeBox);
+
+    auto *maxRow = new QHBoxLayout;
+    maxRow->addWidget(new QLabel(QObject::tr("Most site searches per search:"), &dialog));
+    auto *maxBox = new QSpinBox(&dialog);
+    maxBox->setRange(1, 10);
+    maxBox->setValue(SearchSynonyms::maxSearches());
+    maxBox->setToolTip(QObject::tr("A search can run the search with your filter's words, the search as typed, and "
+        "synonym variants (4K for 2160p...). 3 run at a time. Set 1 to run a single search."));
+    maxRow->addWidget(maxBox);
+    maxRow->addStretch();
+    layout->addLayout(maxRow);
+
+    layout->addWidget(new QLabel(QObject::tr("Synonyms, one group per line (lines starting with # are notes):"), &dialog));
+    auto *edit = new QPlainTextEdit(&dialog);
+    edit->setPlainText(SearchSynonyms::text());
+    edit->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    edit->setMinimumSize(560, 320);
+    layout->addWidget(edit, 1);
+
+    auto *buttons = new QDialogButtonBox((QDialogButtonBox::Save | QDialogButtonBox::Cancel | QDialogButtonBox::RestoreDefaults), &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(buttons->button(QDialogButtonBox::RestoreDefaults), &QPushButton::clicked, &dialog, [edit, maxBox, mergeBox]()
+    {
+        edit->setPlainText(SearchSynonyms::defaultText());
+        maxBox->setValue(6);
+        mergeBox->setChecked(true);
+    });
+    layout->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    SearchSynonyms::setText(edit->toPlainText());
+    SearchSynonyms::setMaxSearches(maxBox->value());
+    SearchSynonyms::setMergeDuplicates(mergeBox->isChecked());
+    if (onChanged)
+        onChanged();
 }

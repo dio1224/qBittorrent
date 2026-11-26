@@ -1,4 +1,4 @@
-# VERSION: 2.00
+# VERSION: 2.01
 # AUTHORS: BurningMop (original), rewritten for Dio's Mac (built with Claude)
 #
 # XXXClub search for qBittorrent. Rewritten in Nov 2026 for the site's current layout:
@@ -116,7 +116,8 @@ class xxxclubto(object):
                     break
             if len(rows) < 50 or not nxt:
                 break
-            page_url = self.url + nxt
+            # the site's next-page link carries the query unencoded ("bangbus 2160p")
+            page_url = self.url + quote(html.unescape(nxt), safe="/%?=&")
 
     def download_torrent(self, info):
         page = get(info)
