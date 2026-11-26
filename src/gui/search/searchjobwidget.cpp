@@ -382,6 +382,19 @@ SearchJobWidget::SearchJobWidget(const QString &id, const QString &searchPattern
 
 SearchJobWidget::~SearchJobWidget()
 {
+    // QWidget deletes its child objects only after this destructor has run, and a process that is
+    // still running emits finished() while it is being deleted. Detach the running processes first,
+    // so they can't call back into this tab after its members are gone (closing a tab during
+    // "Look up details" crashed the app).
+    stopDetailsLookup();
+    for (SearchHandler *handler : asConst(m_searchHandlers))
+    {
+        handler->disconnect(this);
+        handler->cancelSearch();
+    }
+    m_searchHandlers.clear();
+    m_pendingQueries.clear();
+
     saveSettings();
     delete m_ui;
 }

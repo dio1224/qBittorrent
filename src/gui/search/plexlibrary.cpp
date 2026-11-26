@@ -99,14 +99,27 @@ namespace
         QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
         QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
         timer.start(timeoutMs);
+        // On the reader thread, stop waiting as soon as the app asks it to stop (when quitting),
+        // so quitting never waits on a slow Plex server
+        QTimer stopCheck;
+        if (QThread::currentThread() != QCoreApplication::instance()->thread())
+        {
+            QObject::connect(&stopCheck, &QTimer::timeout, &loop, [&loop]()
+            {
+                if (QThread::currentThread()->isInterruptionRequested())
+                    loop.quit();
+            });
+            stopCheck.start(200);
+        }
         if (!reply->isFinished())
             loop.exec();
 
         Response response;
         if (!reply->isFinished())
         {
+            const bool stopped = QThread::currentThread()->isInterruptionRequested();
             reply->abort();
-            response.error = PlexLibrary::tr("timed out");
+            response.error = stopped ? PlexLibrary::tr("stopped") : PlexLibrary::tr("timed out");
         }
         response.status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         response.body = reply->readAll();
