@@ -1,5 +1,6 @@
 <RCC>
     <qresource prefix="/searchengine">
+        <file>nova3/dio_details.py</file>
         <file>nova3/helpers.py</file>
         <file>nova3/nova2.py</file>
         <file>nova3/nova2dl.py</file>

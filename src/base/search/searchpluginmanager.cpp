@@ -581,6 +581,7 @@ void SearchPluginManager::updateNova()
     updateFile(Path(u"nova2dl.py"_s));
     updateFile(Path(u"novaprinter.py"_s));
     updateFile(Path(u"socks.py"_s));
+    updateFile(Path(u"dio_details.py"_s));  // Dio's build: "Look up details" on search results
 
     // Dio's bundled plugins and Cloudflare helper
     DioExtras::syncBundledFiles(enginePath / Path(u"engines"_s));

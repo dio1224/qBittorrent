@@ -136,6 +136,7 @@ private:
         QSet<QString> listings;     // site + download link, to spot the same listing found by several searches
         ReleaseInfo release;
         QStringList extraWarnings;
+        QSet<int> fromPage;         // columns filled in from the torrent's page
     };
 
     void loadSettings();
@@ -167,6 +168,10 @@ private:
     void updateSiteStatus(bool searchFinished);
     void retryFailedSites();
     void updateColumnFilterTitles();
+    void lookUpDetails();
+    void readDetailsOutput();
+    void applyDetails(const class QJsonObject &details);
+    void stopDetailsLookup();
     void updateResultsCount();
     void setStatus(Status value);
     void downloadTorrent(const QModelIndex &rowIndex, AddTorrentOption option = AddTorrentOption::Default);
@@ -213,6 +218,16 @@ private:
     QPushButton *m_turnOffButton = nullptr;
     QStringList m_turnOffCandidates;
     QHash<int, QString> m_columnTitles;
+
+    // "Look up details": reads the selected results' own pages
+    class QProcess *m_detailsProcess = nullptr;
+    QHash<QString, QList<int>> m_detailsRows;   // page address -> source rows
+    QByteArray m_detailsBuffer;
+    int m_detailsTotal = 0;
+    int m_detailsDone = 0;
+    int m_detailsImproved = 0;
+    QStringList m_detailsFailures;
+    QString m_detailsStatus;                    // shown on the results line
     QStandardItemModel *m_searchListModel = nullptr;
     SearchSortModel *m_proxyModel = nullptr;
     LineEdit *m_lineEditSearchResultsFilter = nullptr;

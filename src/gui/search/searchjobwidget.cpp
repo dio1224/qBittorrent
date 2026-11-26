@@ -46,15 +46,21 @@
 #include <QMessageBox>
 #include <QPalette>
 #include <QStandardItemModel>
+#include <QTimer>
+#include <QProcess>
+#include <QJsonObject>
+#include <QJsonDocument>
 #include <QUrl>
 
 #include "base/logger.h"
+#include "base/path.h"
 #include "base/search/dioextras.h"
 #include "base/preferences.h"
 #include "base/search/searchdownloadhandler.h"
 #include "base/search/searchhandler.h"
 #include "base/search/searchpluginmanager.h"
 #include "base/settingsstorage.h"
+#include "base/utils/foreignapps.h"
 #include "base/utils/misc.h"
 #include "gui/desktopintegration.h"
 #include "gui/interfaces/iguiapplication.h"
@@ -183,6 +189,7 @@ namespace
 }
 
 using Utils::Misc::SizeUnit;
+using namespace std::chrono_literals;
 
 SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidget *parent)
     : GUIApplicationComponent(app, parent)
@@ -343,6 +350,8 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
     m_ui->verticalLayout->insertWidget(2, m_siteStatusBar);
 
     connect(PlexLibrary::instance(), &PlexLibrary::indexChanged, this, &SearchJobWidget::updateAllPlexColumns);
+
+
 
     connect(m_ui->filterMode, qOverload<int>(&QComboBox::currentIndexChanged), this, &SearchJobWidget::updateNameFilter);
     connect(m_ui->minSeeds, &QAbstractSpinBox::editingFinished, this, &SearchJobWidget::updateSeedsFilter);
@@ -692,7 +701,11 @@ void SearchJobWidget::updateResultsCount()
         m_ui->resultsLbl->setText(tr("Results (showing <i>%1</i> out of <i>%2</i>):", "i.e: Search results")
                                   .arg(filteredResults).arg(totalResults));
     }
+    if (!m_detailsStatus.isEmpty())
+        m_ui->resultsLbl->setText(m_ui->resultsLbl->text().chopped(1) + u" \u00B7 "_s + m_detailsStatus + u':');
     QStringList tip;
+    if (!m_detailsFailures.isEmpty())
+        tip.append(tr("Pages that couldn't be read:") + u'\n' + m_detailsFailures.join(u'\n'));
     if (m_queries.size() > 1)
     {
         tip.append(tr("Searches sent to the sites:"));
@@ -811,6 +824,11 @@ void SearchJobWidget::contextMenuEvent(QContextMenuEvent *event)
     menu->addSeparator();
     menu->addAction(UIThemeManager::instance()->getIcon(u"application-url"_s), tr("Open description page")
         , this, &SearchJobWidget::openTorrentPages);
+    QAction *detailsAction = menu->addAction(UIThemeManager::instance()->getIcon(u"edit-find"_s), tr("Look up details")
+        , this, &SearchJobWidget::lookUpDetails);
+    detailsAction->setToolTip(tr("Reads the selected results' own pages for details the names leave out, such as Dolby Vision or Atmos"));
+    detailsAction->setEnabled(!m_detailsProcess && m_ui->resultsBrowser->selectionModel()->hasSelection());
+    menu->setToolTipsVisible(true);
 
     QMenu *copySubMenu = menu->addMenu(
         UIThemeManager::instance()->getIcon(u"edit-copy"_s), tr("Copy"));
@@ -1218,12 +1236,176 @@ void SearchJobWidget::setCell(const int row, const int column, const QString &di
 
 void SearchJobWidget::updateQualityColumns(const int row)
 {
-    const ReleaseInfo &release = m_rowInfo.at(row).release;
-    setCell(row, SearchSortModel::RESOLUTION, resolutionText(release.resolution), release.resolution);
-    setCell(row, SearchSortModel::HDR_FORMAT, release.hdrText, release.hdr);
-    setCell(row, SearchSortModel::SOURCE, release.sourceText, release.source);
-    setCell(row, SearchSortModel::AUDIO, release.audioText, release.audio);
-    setCell(row, SearchSortModel::CODEC, release.codec, release.codec);
+    const RowInfo &info = m_rowInfo.at(row);
+    const ReleaseInfo &release = info.release;
+    const auto tip = [&info](const int column) { return info.fromPage.contains(column) ? tr("Read from the torrent's page") : QString(); };
+    setCell(row, SearchSortModel::RESOLUTION, resolutionText(release.resolution), release.resolution, tip(SearchSortModel::RESOLUTION));
+    setCell(row, SearchSortModel::HDR_FORMAT, release.hdrText, release.hdr, tip(SearchSortModel::HDR_FORMAT));
+    setCell(row, SearchSortModel::SOURCE, release.sourceText, release.source, tip(SearchSortModel::SOURCE));
+    setCell(row, SearchSortModel::AUDIO, release.audioText, release.audio, tip(SearchSortModel::AUDIO));
+    setCell(row, SearchSortModel::CODEC, release.codec, release.codec, tip(SearchSortModel::CODEC));
+}
+
+void SearchJobWidget::lookUpDetails()
+{
+    if (m_detailsProcess)
+        return;
+
+    m_detailsRows.clear();
+    QStringList urls;
+    for (const QModelIndex &proxyIndex : m_ui->resultsBrowser->selectionModel()->selectedRows())
+    {
+        const int sourceRow = m_proxyModel->mapToSource(proxyIndex).row();
+        const QString url = m_searchListModel->index(sourceRow, SearchSortModel::DESC_LINK).data(SearchSortModel::UnderlyingDataRole).toString();
+        if (!url.startsWith(u"http", Qt::CaseInsensitive))
+            continue;
+        if (!m_detailsRows.contains(url))
+        {
+            if (urls.size() >= 50)
+                break;
+            urls.append(url);
+        }
+        m_detailsRows[url].append(sourceRow);
+    }
+    if (urls.isEmpty())
+    {
+        m_detailsStatus = tr("no pages to read");
+        updateResultsCount();
+        return;
+    }
+
+    const QString python = DioExtras::isHelperInstalled()
+        ? DioExtras::helperPython().data() : Utils::ForeignApps::pythonInfo().executablePath.data();
+    const Path script = SearchPluginManager::engineLocation() / Path(u"dio_details.py"_s);
+
+    m_detailsProcess = new QProcess(this);
+    m_detailsProcess->setProgram(python);
+    m_detailsProcess->setArguments(QStringList {Utils::ForeignApps::PYTHON_UTF8_MODE_FLAG, script.data()} + urls);
+    m_detailsProcess->setWorkingDirectory(SearchPluginManager::engineLocation().data());
+    connect(m_detailsProcess, &QProcess::readyReadStandardOutput, this, &SearchJobWidget::readDetailsOutput);
+    connect(m_detailsProcess, &QProcess::finished, this, [this]()
+    {
+        readDetailsOutput();
+        m_detailsStatus = tr("pages: %1 of %2 had more").arg(m_detailsImproved).arg(m_detailsDone);
+        if (!m_detailsFailures.isEmpty())
+            m_detailsStatus += tr(", %1 failed").arg(m_detailsFailures.size());
+        updateResultsCount();
+        m_detailsProcess->deleteLater();
+        m_detailsProcess = nullptr;
+    });
+    connect(m_detailsProcess, &QProcess::errorOccurred, this, [this](const QProcess::ProcessError error)
+    {
+        if (error == QProcess::FailedToStart)
+        {
+            m_detailsStatus = tr("couldn't start Python to read the pages");
+            updateResultsCount();
+            m_detailsProcess->deleteLater();
+            m_detailsProcess = nullptr;
+        }
+    });
+    QTimer::singleShot(5min, m_detailsProcess, &QProcess::kill);
+
+    m_detailsTotal = urls.size();
+    m_detailsDone = 0;
+    m_detailsImproved = 0;
+    m_detailsFailures.clear();
+    m_detailsBuffer.clear();
+    m_detailsStatus = tr("reading pages 0/%1...").arg(m_detailsTotal);
+    updateResultsCount();
+    m_detailsProcess->start(QIODevice::ReadOnly);
+}
+
+void SearchJobWidget::readDetailsOutput()
+{
+    if (!m_detailsProcess)
+        return;
+    m_detailsBuffer += m_detailsProcess->readAllStandardOutput();
+    qsizetype newline = m_detailsBuffer.indexOf('\n');
+    while (newline >= 0)
+    {
+        const QByteArray line = m_detailsBuffer.left(newline).trimmed();
+        m_detailsBuffer.remove(0, newline + 1);
+        if (!line.isEmpty())
+            applyDetails(QJsonDocument::fromJson(line).object());
+        newline = m_detailsBuffer.indexOf('\n');
+    }
+}
+
+void SearchJobWidget::applyDetails(const QJsonObject &details)
+{
+    const QString url = details.value(u"url").toString();
+    ++m_detailsDone;
+    if (!details.value(u"ok").toBool())
+    {
+        m_detailsFailures.append(u"%1: %2"_s.arg(QUrl(url).host(), details.value(u"error").toString()));
+    }
+    else
+    {
+        bool improved = false;
+        for (const int row : m_detailsRows.value(url))
+        {
+            if (row >= m_rowInfo.size())
+                continue;
+            RowInfo &info = m_rowInfo[row];
+            ReleaseInfo &release = info.release;
+            // only ever add to what the name says
+            if (details.value(u"hdr").toInt() > release.hdr)
+            {
+                release.hdr = details.value(u"hdr").toInt();
+                release.hdrText = details.value(u"hdrText").toString();
+                info.fromPage.insert(SearchSortModel::HDR_FORMAT);
+                improved = true;
+            }
+            if (details.value(u"audio").toInt() > release.audio)
+            {
+                release.audio = details.value(u"audio").toInt();
+                release.audioText = details.value(u"audioText").toString();
+                info.fromPage.insert(SearchSortModel::AUDIO);
+                improved = true;
+            }
+            if ((release.resolution == 0) && (details.value(u"resolution").toInt() > 0))
+            {
+                release.resolution = details.value(u"resolution").toInt();
+                info.fromPage.insert(SearchSortModel::RESOLUTION);
+                improved = true;
+            }
+            if ((release.source < 0) && details.contains(u"source"))
+            {
+                release.source = details.value(u"source").toInt();
+                release.sourceText = details.value(u"sourceText").toString();
+                info.fromPage.insert(SearchSortModel::SOURCE);
+                improved = true;
+            }
+            if (release.codec.isEmpty() && details.contains(u"codec"))
+            {
+                release.codec = details.value(u"codec").toString();
+                info.fromPage.insert(SearchSortModel::CODEC);
+                improved = true;
+            }
+            updateQualityColumns(row);
+            updateWarningColumn(row);
+            updatePlexColumn(row);
+        }
+        if (improved)
+            ++m_detailsImproved;
+    }
+    if (m_detailsProcess)
+    {
+        m_detailsStatus = tr("reading pages %1/%2...").arg(m_detailsDone).arg(m_detailsTotal);
+        updateResultsCount();
+    }
+}
+
+void SearchJobWidget::stopDetailsLookup()
+{
+    if (!m_detailsProcess)
+        return;
+    m_detailsProcess->disconnect(this);
+    m_detailsProcess->kill();
+    m_detailsProcess->deleteLater();
+    m_detailsProcess = nullptr;
+    m_detailsRows.clear();
+    m_detailsStatus.clear();
 }
 
 void SearchJobWidget::checkSameNameSizes(const int row)
@@ -1448,6 +1630,7 @@ QStringList SearchJobWidget::filterWords() const
 
 void SearchJobWidget::clearResults()
 {
+    stopDetailsLookup();
     m_searchListModel->removeRows(0, m_searchListModel->rowCount());
     m_rowInfo.clear();
     m_rowByHash.clear();
