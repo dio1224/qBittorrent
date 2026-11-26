@@ -47,6 +47,7 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QObject>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QShortcut>
 #include <QSortFilterProxyModel>
@@ -69,6 +70,7 @@
 #include "gui/desktopintegration.h"
 #include "gui/interfaces/iguiapplication.h"
 #include "gui/uithememanager.h"
+#include "dioextrasmenu.h"
 #include "searchjobwidget.h"
 #include "searchpluginselectdialog.h"
 #include "ui_searchwidget.h"
@@ -417,6 +419,12 @@ SearchWidget::SearchWidget(IGUIApplication *app, QWidget *parent)
     onPluginChanged();
 
     connect(m_ui->pluginsButton, &QPushButton::clicked, this, &SearchWidget::pluginsButtonClicked);
+
+    // Extras: Cloudflare helper and RuTracker login for the bundled plugins
+    auto *extrasButton = new QPushButton(tr("Extras"), this);
+    extrasButton->setMenu(DioExtrasMenu::create(this));
+    m_ui->layout2->addWidget(extrasButton);
+    QMetaObject::invokeMethod(this, [this]() { DioExtrasMenu::offerHelperSetupOnce(this); }, Qt::QueuedConnection);
     connect(m_ui->searchButton, &QPushButton::clicked, this, &SearchWidget::searchButtonClicked);
     connect(m_ui->stopButton, &QPushButton::clicked, this, &SearchWidget::stopButtonClicked);
     connect(m_ui->lineEditSearchPattern, &LineEdit::returnPressed, m_ui->searchButton, &QPushButton::click);

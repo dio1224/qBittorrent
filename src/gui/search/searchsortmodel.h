@@ -30,6 +30,9 @@
 #pragma once
 
 #include <QSortFilterProxyModel>
+#include <QDateTime>
+#include <QList>
+#include <QRegularExpression>
 #include <QStringList>
 
 #include "base/utils/compare.h"
@@ -58,7 +61,58 @@ public:
         UnderlyingDataRole = Qt::UserRole
     };
 
+    // One condition from the filter builder
+    struct FilterRule
+    {
+        enum class Field
+        {
+            Name,
+            Size,
+            Seeds,
+            Leeches,
+            Engine,
+            PubDate
+        };
+
+        enum class Op
+        {
+            // text (Name, Engine)
+            Contains,
+            DoesNotContain,
+            ContainsWord,       // whole word, so "DV" doesn't match "DVD"
+            DoesNotContainWord,
+            Is,
+            IsNot,
+            StartsWith,
+            DoesNotStartWith,
+            EndsWith,
+            DoesNotEndWith,
+            MatchesPattern,     // regular expression
+            DoesNotMatchPattern,
+            // numbers (Size in bytes, Seeds, Leeches)
+            Equal,
+            NotEqual,
+            Greater,
+            GreaterOrEqual,
+            Less,
+            LessOrEqual,
+            // dates (PubDate)
+            After,
+            Before,
+            WithinLastDays,
+            OlderThanDays
+        };
+
+        Field field = Field::Name;
+        Op op = Op::Contains;
+        QString text;       // text value, or the number/date as text
+    };
+
     explicit SearchSortModel(QObject *parent = nullptr);
+
+    //! \brief Sets the filter builder's rules
+    //! \param matchAll true: every rule must pass; false: any one rule passing is enough
+    void setFilterRules(const QList<FilterRule> &rules, bool matchAll);
 
     void enableNameFilter(bool enabled);
     void setNameFilter(const QString &searchTerm = {});
@@ -93,6 +147,19 @@ protected:
     bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override;
 
 private:
+    struct CompiledRule
+    {
+        FilterRule rule;
+        QRegularExpression regex;   // text rules
+        double number = 0;          // number rules
+        QDateTime dateTime;         // date rules (absolute)
+        qint64 days = 0;            // date rules (relative)
+    };
+
+    bool ruleMatches(int sourceRow, const QModelIndex &sourceParent, const CompiledRule &rule) const;
+
+    QList<CompiledRule> m_filterRules;
+    bool m_filterRulesMatchAll = true;
     bool m_isNameFilterEnabled = false;
     QString m_searchTerm;
     QStringList m_searchTermWords;

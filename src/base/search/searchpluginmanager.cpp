@@ -29,6 +29,8 @@
 
 #include "searchpluginmanager.h"
 
+#include "dioextras.h"
+
 #include <memory>
 
 #include <QtLogging>
@@ -579,6 +581,9 @@ void SearchPluginManager::updateNova()
     updateFile(Path(u"nova2dl.py"_s));
     updateFile(Path(u"novaprinter.py"_s));
     updateFile(Path(u"socks.py"_s));
+
+    // Dio's bundled plugins and Cloudflare helper
+    DioExtras::syncBundledFiles(enginePath / Path(u"engines"_s));
 }
 
 void SearchPluginManager::update()

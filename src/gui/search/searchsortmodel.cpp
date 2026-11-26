@@ -29,6 +29,8 @@
 
 #include "searchsortmodel.h"
 
+#include <cmath>
+
 #include "base/global.h"
 
 SearchSortModel::SearchSortModel(QObject *parent)
@@ -186,9 +188,179 @@ bool SearchSortModel::lessThan(const QModelIndex &left, const QModelIndex &right
     };
 }
 
+void SearchSortModel::setFilterRules(const QList<FilterRule> &rules, const bool matchAll)
+{
+    using Op = FilterRule::Op;
+    using Field = FilterRule::Field;
+
+    m_filterRules.clear();
+    for (const FilterRule &rule : rules)
+    {
+        CompiledRule c;
+        c.rule = rule;
+        const QString text = rule.text.trimmed();
+        if (text.isEmpty())
+            continue;
+
+        switch (rule.field)
+        {
+        case Field::Name:
+        case Field::Engine:
+            {
+                const QString esc = QRegularExpression::escape(text);
+                const QString notWordChar = u"[\\p{L}\\p{N}]"_s;
+                QString pattern;
+                switch (rule.op)
+                {
+                case Op::ContainsWord:
+                case Op::DoesNotContainWord:
+                    pattern = u"(?<!"_s + notWordChar + u")"_s + esc + u"(?!"_s + notWordChar + u")"_s;
+                    break;
+                case Op::Is:
+                case Op::IsNot:
+                    pattern = u"^"_s + esc + u"$"_s;
+                    break;
+                case Op::StartsWith:
+                case Op::DoesNotStartWith:
+                    pattern = u"^"_s + esc;
+                    break;
+                case Op::EndsWith:
+                case Op::DoesNotEndWith:
+                    pattern = esc + u"$"_s;
+                    break;
+                case Op::MatchesPattern:
+                case Op::DoesNotMatchPattern:
+                    pattern = text;
+                    break;
+                default:
+                    pattern = esc;
+                    break;
+                }
+                c.regex = QRegularExpression(pattern, QRegularExpression::CaseInsensitiveOption);
+                if (!c.regex.isValid())
+                    continue;   // half-typed pattern: ignore until it's valid
+            }
+            break;
+        case Field::Size:
+        case Field::Seeds:
+        case Field::Leeches:
+            {
+                bool ok = false;
+                c.number = text.toDouble(&ok);
+                if (!ok)
+                    continue;
+            }
+            break;
+        case Field::PubDate:
+            if ((rule.op == Op::WithinLastDays) || (rule.op == Op::OlderThanDays))
+            {
+                bool ok = false;
+                c.days = text.toLongLong(&ok);
+                if (!ok)
+                    continue;
+            }
+            else
+            {
+                c.dateTime = QDateTime(QDate::fromString(text, Qt::ISODate), QTime(0, 0));
+                if (!c.dateTime.isValid())
+                    continue;
+            }
+            break;
+        }
+        m_filterRules.append(c);
+    }
+    m_filterRulesMatchAll = matchAll;
+    invalidateRowsFilter();
+}
+
+bool SearchSortModel::ruleMatches(const int sourceRow, const QModelIndex &sourceParent, const CompiledRule &c) const
+{
+    using Op = FilterRule::Op;
+    using Field = FilterRule::Field;
+
+    const QAbstractItemModel *const model = sourceModel();
+    const auto value = [&](const int column) { return model->data(model->index(sourceRow, column, sourceParent), UnderlyingDataRole); };
+
+    switch (c.rule.field)
+    {
+    case Field::Name:
+    case Field::Engine:
+        {
+            const bool found = c.regex.match(value((c.rule.field == Field::Name) ? NAME : ENGINE_NAME).toString()).hasMatch();
+            switch (c.rule.op)
+            {
+            case Op::DoesNotContain:
+            case Op::DoesNotContainWord:
+            case Op::IsNot:
+            case Op::DoesNotStartWith:
+            case Op::DoesNotEndWith:
+            case Op::DoesNotMatchPattern:
+                return !found;
+            default:
+                return found;
+            }
+        }
+    case Field::Size:
+    case Field::Seeds:
+    case Field::Leeches:
+        {
+            const int column = (c.rule.field == Field::Size) ? SIZE : ((c.rule.field == Field::Seeds) ? SEEDS : LEECHES);
+            const double v = value(column).toDouble();
+            // sizes compare within half a percent so "equal to 56 GB" matches 56.03 GB
+            const double tolerance = (c.rule.field == Field::Size) ? (c.number * 0.005) : 0.0;
+            switch (c.rule.op)
+            {
+            case Op::Equal: return std::abs(v - c.number) <= tolerance;
+            case Op::NotEqual: return std::abs(v - c.number) > tolerance;
+            case Op::Greater: return v > c.number;
+            case Op::GreaterOrEqual: return v >= c.number;
+            case Op::Less: return v < c.number;
+            case Op::LessOrEqual: return v <= c.number;
+            default: return true;
+            }
+        }
+    case Field::PubDate:
+        {
+            const QDateTime date = value(PUB_DATE).toDateTime();
+            if (!date.isValid())
+                return false;
+            switch (c.rule.op)
+            {
+            case Op::After: return date >= c.dateTime.addDays(1);
+            case Op::Before: return date < c.dateTime;
+            case Op::WithinLastDays: return date >= QDateTime::currentDateTime().addDays(-c.days);
+            case Op::OlderThanDays: return date < QDateTime::currentDateTime().addDays(-c.days);
+            default: return true;
+            }
+        }
+    }
+    return true;
+}
+
 bool SearchSortModel::filterAcceptsRow(const int sourceRow, const QModelIndex &sourceParent) const
 {
     const QAbstractItemModel *const sourceModel = this->sourceModel();
+
+    if (!m_filterRules.isEmpty())
+    {
+        bool accepted = m_filterRulesMatchAll;
+        for (const CompiledRule &rule : asConst(m_filterRules))
+        {
+            const bool ok = ruleMatches(sourceRow, sourceParent, rule);
+            if (m_filterRulesMatchAll && !ok)
+            {
+                accepted = false;
+                break;
+            }
+            if (!m_filterRulesMatchAll && ok)
+            {
+                accepted = true;
+                break;
+            }
+        }
+        if (!accepted)
+            return false;
+    }
 
     if (m_isNameFilterEnabled && !m_searchTerm.isEmpty())
     {

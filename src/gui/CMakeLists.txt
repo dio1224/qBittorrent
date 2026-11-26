@@ -93,6 +93,8 @@ add_library(qbt_gui STATIC
     rss/htmlbrowser.h
     rss/rssfeeddialog.h
     rss/rsswidget.h
+    search/dioextrasmenu.h
+    search/searchfilterbuilder.h
     search/searchjobwidget.h
     search/searchpluginselectdialog.h
     search/searchpluginsourcedialog.h
@@ -199,6 +201,8 @@ add_library(qbt_gui STATIC
     rss/htmlbrowser.cpp
     rss/rssfeeddialog.cpp
     rss/rsswidget.cpp
+    search/dioextrasmenu.cpp
+    search/searchfilterbuilder.cpp
     search/searchjobwidget.cpp
     search/searchpluginselectdialog.cpp
     search/searchpluginsourcedialog.cpp

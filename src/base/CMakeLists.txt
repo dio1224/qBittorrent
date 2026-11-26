@@ -104,6 +104,7 @@ add_library(qbt_base STATIC
     rss/rss_session.h
     search/searchdownloadhandler.h
     search/searchhandler.h
+    search/dioextras.h
     search/searchpluginmanager.h
     settingsstorage.h
     tag.h
@@ -208,6 +209,7 @@ add_library(qbt_base STATIC
     rss/rss_session.cpp
     search/searchdownloadhandler.cpp
     search/searchhandler.cpp
+    search/dioextras.cpp
     search/searchpluginmanager.cpp
     settingsstorage.cpp
     tag.cpp

@@ -44,6 +44,7 @@ class QStandardItemModel;
 
 class LineEdit;
 class SearchHandler;
+class SearchFilterBuilder;
 class SearchSortModel;
 struct SearchResult;
 
@@ -107,6 +108,7 @@ private:
     void loadSettings();
     void saveSettings() const;
     void updateNameFilter();
+    void updateFilterRules();
     void updateSeedsFilter();
     void updateSizeFilter();
     void filterSearchResults(const QString &name);
@@ -144,6 +146,7 @@ private:
     QStandardItemModel *m_searchListModel = nullptr;
     SearchSortModel *m_proxyModel = nullptr;
     LineEdit *m_lineEditSearchResultsFilter = nullptr;
+    SearchFilterBuilder *m_filterBuilder = nullptr;
     Status m_status = Status::Ready;
     bool m_noSearchResults = true;
 };

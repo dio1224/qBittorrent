@@ -1,0 +1,14 @@
+<RCC>
+    <qresource prefix="/dioextras">
+        <file>engines/leetx.py</file>
+        <file>engines/exttorrents.py</file>
+        <file>engines/fitgirl_repacks.py</file>
+        <file>engines/internetarchive.py</file>
+        <file>engines/nyaasi.py</file>
+        <file>engines/rutracker.py</file>
+        <file>engines/xxxclubto.py</file>
+        <file>engines/yts.py</file>
+        <file>cfhelper/cfpass.py</file>
+        <file>cfhelper/requirements.txt</file>
+    </qresource>
+</RCC>

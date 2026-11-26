@@ -1,6 +1,6 @@
 name: CI - File health
 
-on: [pull_request, push]
+on: [workflow_dispatch]
 
 permissions: {}
 
