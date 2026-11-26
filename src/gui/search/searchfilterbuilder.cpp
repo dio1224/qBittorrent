@@ -132,8 +132,9 @@ namespace
     };
 }
 
-SearchFilterBuilder::SearchFilterBuilder(QWidget *parent)
+SearchFilterBuilder::SearchFilterBuilder(QWidget *parent, const Mode mode)
     : QWidget(parent)
+    , m_mode(mode)
 {
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
@@ -142,10 +143,10 @@ SearchFilterBuilder::SearchFilterBuilder(QWidget *parent)
     auto *header = new QHBoxLayout;
     header->setContentsMargins(0, 0, 0, 0);
 
-    auto *addButton = new QPushButton(UIThemeManager::instance()->getIcon(u"list-add"_s), tr("Add filter"), this);
-    addButton->setToolTip(tr("Add a filter rule. Stack as many as you like."));
-    connect(addButton, &QPushButton::clicked, this, [this]() { addRow(); });
-    header->addWidget(addButton);
+    m_addButton = new QPushButton(UIThemeManager::instance()->getIcon(u"list-add"_s), tr("Add filter"), this);
+    m_addButton->setToolTip(tr("Add a filter rule. Stack as many as you like."));
+    connect(m_addButton, &QPushButton::clicked, this, [this]() { addRow(); });
+    header->addWidget(m_addButton);
 
     m_matchBox = new QWidget(this);
     auto *matchLayout = new QHBoxLayout(m_matchBox);
@@ -184,7 +185,14 @@ SearchFilterBuilder::SearchFilterBuilder(QWidget *parent)
     m_rowsLayout->setSpacing(2);
     outer->addLayout(m_rowsLayout);
 
-    load();
+    if (m_mode == Mode::Search)
+        load();
+    updateHeaderVisibility();
+}
+
+void SearchFilterBuilder::addEmptyRow()
+{
+    addRow();
 }
 
 bool SearchFilterBuilder::matchAll() const
@@ -195,7 +203,7 @@ bool SearchFilterBuilder::matchAll() const
 QStringList SearchFilterBuilder::searchWords() const
 {
     QStringList words;
-    if (!m_sendWords->isChecked() || (!matchAll() && (m_rows.size() > 1)))
+    if ((m_mode != Mode::Search) || !m_sendWords->isChecked() || (!matchAll() && (m_rows.size() > 1)))
         return words;
     for (const Row &row : m_rows)
     {
@@ -436,15 +444,26 @@ void SearchFilterBuilder::updateHeaderVisibility()
 {
     m_matchBox->setVisible(m_rows.size() > 1);
     m_clearButton->setVisible(!m_rows.isEmpty());
-    m_sendWords->setVisible(!m_rows.isEmpty());
-    m_searchAgainButton->setVisible(!m_rows.isEmpty());
+    const bool searchMode = (m_mode == Mode::Search);
+    m_addButton->setVisible(searchMode || !m_rows.isEmpty());
+    m_sendWords->setVisible(searchMode && !m_rows.isEmpty());
+    m_searchAgainButton->setVisible(searchMode && !m_rows.isEmpty());
+
+    // With "any rule (OR)", the words can't be sent: a site search for
+    // "title A B" only returns releases with both words
+    const bool canSend = matchAll() || (m_rows.size() <= 1);
+    m_sendWords->setEnabled(canSend);
+    m_sendWords->setText(canSend ? tr("Include required words in the search")
+        : tr("Include required words in the search (needs \"all rules\")"));
 }
 
 void SearchFilterBuilder::onChanged()
 {
     if (m_loading)
         return;
-    save();
+    updateHeaderVisibility();
+    if (m_mode == Mode::Search)
+        save();
     emit rulesChanged();
 }
 

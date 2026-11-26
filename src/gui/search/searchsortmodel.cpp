@@ -190,10 +190,24 @@ bool SearchSortModel::lessThan(const QModelIndex &left, const QModelIndex &right
 
 void SearchSortModel::setFilterRules(const QList<FilterRule> &rules, const bool matchAll)
 {
+    m_filterRules = compileRules(rules);
+    m_filterRulesMatchAll = matchAll;
+    invalidateRowsFilter();
+}
+
+void SearchSortModel::setLocalFilterRules(const QList<FilterRule> &rules, const bool matchAll)
+{
+    m_localRules = compileRules(rules);
+    m_localRulesMatchAll = matchAll;
+    invalidateRowsFilter();
+}
+
+QList<SearchSortModel::CompiledRule> SearchSortModel::compileRules(const QList<FilterRule> &rules) const
+{
     using Op = FilterRule::Op;
     using Field = FilterRule::Field;
 
-    m_filterRules.clear();
+    QList<CompiledRule> compiled;
     for (const FilterRule &rule : rules)
     {
         CompiledRule c;
@@ -267,10 +281,24 @@ void SearchSortModel::setFilterRules(const QList<FilterRule> &rules, const bool 
             }
             break;
         }
-        m_filterRules.append(c);
+        compiled.append(c);
     }
-    m_filterRulesMatchAll = matchAll;
-    invalidateRowsFilter();
+    return compiled;
+}
+
+bool SearchSortModel::rulesPass(const QList<CompiledRule> &rules, const bool matchAll, const int sourceRow, const QModelIndex &sourceParent) const
+{
+    if (rules.isEmpty())
+        return true;
+    for (const CompiledRule &rule : rules)
+    {
+        const bool ok = ruleMatches(sourceRow, sourceParent, rule);
+        if (matchAll && !ok)
+            return false;
+        if (!matchAll && ok)
+            return true;
+    }
+    return matchAll;
 }
 
 bool SearchSortModel::ruleMatches(const int sourceRow, const QModelIndex &sourceParent, const CompiledRule &c) const
@@ -341,26 +369,9 @@ bool SearchSortModel::filterAcceptsRow(const int sourceRow, const QModelIndex &s
 {
     const QAbstractItemModel *const sourceModel = this->sourceModel();
 
-    if (!m_filterRules.isEmpty())
-    {
-        bool accepted = m_filterRulesMatchAll;
-        for (const CompiledRule &rule : asConst(m_filterRules))
-        {
-            const bool ok = ruleMatches(sourceRow, sourceParent, rule);
-            if (m_filterRulesMatchAll && !ok)
-            {
-                accepted = false;
-                break;
-            }
-            if (!m_filterRulesMatchAll && ok)
-            {
-                accepted = true;
-                break;
-            }
-        }
-        if (!accepted)
-            return false;
-    }
+    if (!rulesPass(m_filterRules, m_filterRulesMatchAll, sourceRow, sourceParent)
+        || !rulesPass(m_localRules, m_localRulesMatchAll, sourceRow, sourceParent))
+        return false;
 
     if (m_isNameFilterEnabled && !m_searchTerm.isEmpty())
     {

@@ -146,6 +146,7 @@ private:
     QStandardItemModel *m_searchListModel = nullptr;
     SearchSortModel *m_proxyModel = nullptr;
     LineEdit *m_lineEditSearchResultsFilter = nullptr;
+    class SearchFilterBuilder *m_resultsFilterBuilder = nullptr;
     Status m_status = Status::Ready;
     bool m_noSearchResults = true;
 };

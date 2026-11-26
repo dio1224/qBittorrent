@@ -35,6 +35,7 @@
 #include <QHeaderView>
 #include <QKeyEvent>
 #include <QMenu>
+#include <QPushButton>
 #include <QMessageBox>
 #include <QPalette>
 #include <QStandardItemModel>
@@ -49,6 +50,7 @@
 #include "gui/interfaces/iguiapplication.h"
 #include "gui/lineedit.h"
 #include "gui/uithememanager.h"
+#include "searchfilterbuilder.h"
 #include "searchsortmodel.h"
 #include "ui_searchjobwidget.h"
 
@@ -171,6 +173,19 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
     connect(m_lineEditSearchResultsFilter, &QWidget::customContextMenuRequested, this, &SearchJobWidget::showFilterContextMenu);
     connect(m_lineEditSearchResultsFilter, &LineEdit::textUpdated, this, &SearchJobWidget::filterSearchResults);
     m_ui->horizontalLayout->insertWidget(0, m_lineEditSearchResultsFilter);
+
+    // Extra filter rules for just this tab's results, on top of the search's rules
+    m_resultsFilterBuilder = new SearchFilterBuilder(this, SearchFilterBuilder::Mode::Results);
+    m_ui->verticalLayout->insertWidget(1, m_resultsFilterBuilder);
+    auto *addResultsFilter = new QPushButton(UIThemeManager::instance()->getIcon(u"list-add"_s), tr("Filter"), this);
+    addResultsFilter->setToolTip(tr("Add filter rules for these results only"));
+    connect(addResultsFilter, &QPushButton::clicked, m_resultsFilterBuilder, &SearchFilterBuilder::addEmptyRow);
+    m_ui->horizontalLayout->insertWidget(1, addResultsFilter);
+    connect(m_resultsFilterBuilder, &SearchFilterBuilder::rulesChanged, this, [this]()
+    {
+        m_proxyModel->setLocalFilterRules(m_resultsFilterBuilder->rules(), m_resultsFilterBuilder->matchAll());
+        updateResultsCount();
+    });
 
     connect(m_ui->filterMode, qOverload<int>(&QComboBox::currentIndexChanged), this, &SearchJobWidget::updateNameFilter);
     connect(m_ui->minSeeds, &QAbstractSpinBox::editingFinished, this, &SearchJobWidget::updateSeedsFilter);

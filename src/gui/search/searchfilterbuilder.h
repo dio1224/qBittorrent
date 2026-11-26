@@ -52,7 +52,15 @@ class SearchFilterBuilder final : public QWidget
     Q_DISABLE_COPY_MOVE(SearchFilterBuilder)
 
 public:
-    explicit SearchFilterBuilder(QWidget *parent = nullptr);
+    enum class Mode
+    {
+        Search,     // above the tabs: saved, can send words to the sites
+        Results     // inside one results tab: not saved, filters only that tab
+    };
+
+    explicit SearchFilterBuilder(QWidget *parent = nullptr, Mode mode = Mode::Search);
+
+    void addEmptyRow();
 
     QList<SearchSortModel::FilterRule> rules() const;
     bool matchAll() const;
@@ -98,6 +106,8 @@ private:
     QPushButton *m_clearButton = nullptr;
     QPushButton *m_searchAgainButton = nullptr;
     QCheckBox *m_sendWords = nullptr;
+    QPushButton *m_addButton = nullptr;
+    Mode m_mode = Mode::Search;
     QList<Row> m_rows;
     bool m_loading = false;
 };

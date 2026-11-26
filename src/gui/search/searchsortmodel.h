@@ -113,6 +113,8 @@ public:
     //! \brief Sets the filter builder's rules
     //! \param matchAll true: every rule must pass; false: any one rule passing is enough
     void setFilterRules(const QList<FilterRule> &rules, bool matchAll);
+    //! \brief Extra rules for one results tab, applied on top of the search's rules
+    void setLocalFilterRules(const QList<FilterRule> &rules, bool matchAll);
 
     void enableNameFilter(bool enabled);
     void setNameFilter(const QString &searchTerm = {});
@@ -157,9 +159,13 @@ private:
     };
 
     bool ruleMatches(int sourceRow, const QModelIndex &sourceParent, const CompiledRule &rule) const;
+    QList<CompiledRule> compileRules(const QList<FilterRule> &rules) const;
+    bool rulesPass(const QList<CompiledRule> &rules, bool matchAll, int sourceRow, const QModelIndex &sourceParent) const;
 
     QList<CompiledRule> m_filterRules;
     bool m_filterRulesMatchAll = true;
+    QList<CompiledRule> m_localRules;
+    bool m_localRulesMatchAll = true;
     bool m_isNameFilterEnabled = false;
     QString m_searchTerm;
     QStringList m_searchTermWords;
