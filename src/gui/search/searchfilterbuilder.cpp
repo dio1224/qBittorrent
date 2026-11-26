@@ -28,6 +28,7 @@
 
 #include "searchfilterbuilder.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDate>
 #include <QDateEdit>
@@ -52,6 +53,7 @@ namespace
 {
     const QString KEY_RULES = u"Search/FilterBuilder/Rules2"_s;
     const QString KEY_MATCH_ALL = u"Search/FilterBuilder/MatchAll"_s;
+    const QString KEY_SEND_WORDS = u"Search/FilterBuilder/SendWordsToSites"_s;
 
     enum Editor
     {
@@ -164,6 +166,17 @@ SearchFilterBuilder::SearchFilterBuilder(QWidget *parent)
     });
     header->addWidget(m_clearButton);
     header->addStretch();
+
+    m_sendWords = new QCheckBox(tr("Include required words in the search"), this);
+    m_sendWords->setToolTip(tr("Adds the words from \"Name contains\" rules to what's sent to the sites, so they return those releases "
+        "instead of only their top results for the title. Other rules filter the results here."));
+    connect(m_sendWords, &QCheckBox::toggled, this, &SearchFilterBuilder::onChanged);
+    header->addWidget(m_sendWords);
+
+    m_searchAgainButton = new QPushButton(UIThemeManager::instance()->getIcon(u"edit-find"_s), tr("Apply && search again"), this);
+    m_searchAgainButton->setToolTip(tr("Runs the search again from scratch with the filter's required words sent to the sites"));
+    connect(m_searchAgainButton, &QPushButton::clicked, this, &SearchFilterBuilder::searchAgainRequested);
+    header->addWidget(m_searchAgainButton);
     outer->addLayout(header);
 
     m_rowsLayout = new QVBoxLayout;
@@ -177,6 +190,24 @@ SearchFilterBuilder::SearchFilterBuilder(QWidget *parent)
 bool SearchFilterBuilder::matchAll() const
 {
     return m_matchMode->currentIndex() == 0;
+}
+
+QStringList SearchFilterBuilder::searchWords() const
+{
+    QStringList words;
+    if (!m_sendWords->isChecked() || (!matchAll() && (m_rows.size() > 1)))
+        return words;
+    for (const Row &row : m_rows)
+    {
+        const SearchSortModel::FilterRule rule = ruleOf(row);
+        if ((rule.field == Field::Name) && ((rule.op == Op::Contains) || (rule.op == Op::ContainsWord)))
+        {
+            const QString text = rule.text.simplified();
+            if (!text.isEmpty())
+                words.append(text);
+        }
+    }
+    return words;
 }
 
 QList<SearchSortModel::FilterRule> SearchFilterBuilder::rules() const
@@ -405,6 +436,8 @@ void SearchFilterBuilder::updateHeaderVisibility()
 {
     m_matchBox->setVisible(m_rows.size() > 1);
     m_clearButton->setVisible(!m_rows.isEmpty());
+    m_sendWords->setVisible(!m_rows.isEmpty());
+    m_searchAgainButton->setVisible(!m_rows.isEmpty());
 }
 
 void SearchFilterBuilder::onChanged()
@@ -453,6 +486,7 @@ void SearchFilterBuilder::load()
         addRow({parts[0], parts[1], value, parts[2]});
     }
     m_matchMode->setCurrentIndex(storage->loadValue<bool>(KEY_MATCH_ALL, true) ? 0 : 1);
+    m_sendWords->setChecked(storage->loadValue<bool>(KEY_SEND_WORDS, true));
     m_loading = false;
     updateHeaderVisibility();
 }
@@ -465,4 +499,5 @@ void SearchFilterBuilder::save() const
     auto *storage = SettingsStorage::instance();
     storage->storeValue(KEY_RULES, saved);
     storage->storeValue(KEY_MATCH_ALL, matchAll());
+    storage->storeValue(KEY_SEND_WORDS, m_sendWords->isChecked());
 }

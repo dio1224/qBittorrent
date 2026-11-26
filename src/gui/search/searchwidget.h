@@ -41,6 +41,7 @@ class QEvent;
 class QObject;
 class QStringListModel;
 
+class SearchFilterBuilder;
 class SearchJobWidget;
 
 namespace Ui
@@ -105,6 +106,7 @@ private:
     QPointer<SearchJobWidget> m_currentSearchTab; // Selected tab
     bool m_isNewQueryString = false;
     QHash<QString, SearchJobWidget *> m_tabWidgets;
+    SearchFilterBuilder *m_filterBuilder = nullptr;
 
     bool m_storeOpenedTabs = false;
     bool m_storeOpenedTabsResults = false;

@@ -71,6 +71,7 @@
 #include "gui/interfaces/iguiapplication.h"
 #include "gui/uithememanager.h"
 #include "dioextrasmenu.h"
+#include "searchfilterbuilder.h"
 #include "searchjobwidget.h"
 #include "searchpluginselectdialog.h"
 #include "ui_searchwidget.h"
@@ -420,6 +421,22 @@ SearchWidget::SearchWidget(IGUIApplication *app, QWidget *parent)
 
     connect(m_ui->pluginsButton, &QPushButton::clicked, this, &SearchWidget::pluginsButtonClicked);
 
+    // Filter rules: set before searching, applied to every results tab
+    m_filterBuilder = new SearchFilterBuilder(this);
+    m_ui->verticalLayout_3->insertWidget(1, m_filterBuilder);
+    connect(m_filterBuilder, &SearchFilterBuilder::searchAgainRequested, this, [this]()
+    {
+        if (!m_ui->lineEditSearchPattern->text().trimmed().isEmpty())
+            searchButtonClicked();
+    });
+    connect(m_filterBuilder, &SearchFilterBuilder::rulesChanged, this, [this]()
+    {
+        for (SearchJobWidget *tab : asConst(m_tabWidgets))
+            tab->setFilterRules(m_filterBuilder->rules(), m_filterBuilder->matchAll());
+    });
+    for (SearchJobWidget *tab : asConst(m_tabWidgets))
+        tab->setFilterRules(m_filterBuilder->rules(), m_filterBuilder->matchAll());
+
     // Extras: Cloudflare helper and RuTracker login for the bundled plugins
     auto *extrasButton = new QPushButton(tr("Extras"), this);
     extrasButton->setMenu(DioExtrasMenu::create(this));
@@ -651,6 +668,8 @@ int SearchWidget::addTab(const QString &tabID, SearchJobWidget *searchJobWdget)
 
     connect(searchJobWdget, &SearchJobWidget::statusChanged, this, [this, searchJobWdget]() { tabStatusChanged(searchJobWdget); });
     m_tabWidgets.insert(tabID, searchJobWdget);
+    if (m_filterBuilder)
+        searchJobWdget->setFilterRules(m_filterBuilder->rules(), m_filterBuilder->matchAll());
     return m_ui->tabWidget->addTab(searchJobWdget, makeTabName(searchJobWdget));
 }
 
@@ -916,8 +935,16 @@ void SearchWidget::searchButtonClicked()
 
     qDebug("Search with category: %s", qUtf8Printable(selectedCategory()));
 
+    // Add the filter's required words to what the sites search for
+    QString sitePattern = pattern;
+    for (const QString &word : m_filterBuilder->searchWords())
+    {
+        if (!sitePattern.contains(word, Qt::CaseInsensitive))
+            sitePattern += u' ' + word;
+    }
+
     // Launch search
-    auto *searchHandler = SearchPluginManager::instance()->startSearch(pattern, selectedCategory(), selectedPlugins());
+    auto *searchHandler = SearchPluginManager::instance()->startSearch(sitePattern, selectedCategory(), selectedPlugins());
 
     // Tab Addition
     const QString newTabID = generateTabID();

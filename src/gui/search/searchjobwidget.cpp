@@ -49,7 +49,6 @@
 #include "gui/interfaces/iguiapplication.h"
 #include "gui/lineedit.h"
 #include "gui/uithememanager.h"
-#include "searchfilterbuilder.h"
 #include "searchsortmodel.h"
 #include "ui_searchjobwidget.h"
 
@@ -172,12 +171,6 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
     connect(m_lineEditSearchResultsFilter, &QWidget::customContextMenuRequested, this, &SearchJobWidget::showFilterContextMenu);
     connect(m_lineEditSearchResultsFilter, &LineEdit::textUpdated, this, &SearchJobWidget::filterSearchResults);
     m_ui->horizontalLayout->insertWidget(0, m_lineEditSearchResultsFilter);
-
-    m_filterBuilder = new SearchFilterBuilder(this);
-    m_ui->verticalLayout->insertWidget(1, m_filterBuilder);
-    connect(m_filterBuilder, &SearchFilterBuilder::rulesChanged, this, &SearchJobWidget::updateFilterRules);
-    m_proxyModel->setFilterRules(m_filterBuilder->rules(), m_filterBuilder->matchAll());
-    updateResultsCount();
 
     connect(m_ui->filterMode, qOverload<int>(&QComboBox::currentIndexChanged), this, &SearchJobWidget::updateNameFilter);
     connect(m_ui->minSeeds, &QAbstractSpinBox::editingFinished, this, &SearchJobWidget::updateSeedsFilter);
@@ -471,9 +464,9 @@ void SearchJobWidget::updateNameFilter()
     updateResultsCount();
 }
 
-void SearchJobWidget::updateFilterRules()
+void SearchJobWidget::setFilterRules(const QList<SearchSortModel::FilterRule> &rules, const bool matchAll)
 {
-    m_proxyModel->setFilterRules(m_filterBuilder->rules(), m_filterBuilder->matchAll());
+    m_proxyModel->setFilterRules(rules, matchAll);
     updateResultsCount();
 }
 

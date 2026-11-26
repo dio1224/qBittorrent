@@ -34,6 +34,7 @@
 #include "base/settingvalue.h"
 #include "gui/guiaddtorrentmanager.h"
 #include "gui/guiapplicationcomponent.h"
+#include "searchsortmodel.h"
 
 #define ENGINE_URL_COLUMN 4
 #define URL_COLUMN 5
@@ -44,7 +45,6 @@ class QStandardItemModel;
 
 class LineEdit;
 class SearchHandler;
-class SearchFilterBuilder;
 class SearchSortModel;
 struct SearchResult;
 
@@ -90,6 +90,7 @@ public:
     LineEdit *lineEditSearchResultsFilter() const;
 
     void assignSearchHandler(SearchHandler *searchHandler);
+    void setFilterRules(const QList<SearchSortModel::FilterRule> &rules, bool matchAll);
     void cancelSearch();
 
 signals:
@@ -108,7 +109,6 @@ private:
     void loadSettings();
     void saveSettings() const;
     void updateNameFilter();
-    void updateFilterRules();
     void updateSeedsFilter();
     void updateSizeFilter();
     void filterSearchResults(const QString &name);
@@ -146,7 +146,6 @@ private:
     QStandardItemModel *m_searchListModel = nullptr;
     SearchSortModel *m_proxyModel = nullptr;
     LineEdit *m_lineEditSearchResultsFilter = nullptr;
-    SearchFilterBuilder *m_filterBuilder = nullptr;
     Status m_status = Status::Ready;
     bool m_noSearchResults = true;
 };

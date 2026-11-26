@@ -33,6 +33,7 @@
 
 #include "searchsortmodel.h"
 
+class QCheckBox;
 class QComboBox;
 class QDateEdit;
 class QDoubleSpinBox;
@@ -56,8 +57,13 @@ public:
     QList<SearchSortModel::FilterRule> rules() const;
     bool matchAll() const;
 
+    // Words from "Name contains" rules that should be added to the search
+    // itself (only when the rules must all match and the option is on)
+    QStringList searchWords() const;
+
 signals:
     void rulesChanged();
+    void searchAgainRequested();
 
 private:
     struct Row
@@ -90,6 +96,8 @@ private:
     QComboBox *m_matchMode = nullptr;
     QWidget *m_matchBox = nullptr;
     QPushButton *m_clearButton = nullptr;
+    QPushButton *m_searchAgainButton = nullptr;
+    QCheckBox *m_sendWords = nullptr;
     QList<Row> m_rows;
     bool m_loading = false;
 };
