@@ -205,9 +205,21 @@ bool SearchSortModel::lessThan(const QModelIndex &left, const QModelIndex &right
     {
         // Qt flips the whole result for a descending main sort, so a tie-break column whose
         // direction differs from the main one compares the other way round
-        for (const SortKey &key : m_sortKeys)
+        for (qsizetype level = 0; level < m_sortKeys.size(); ++level)
         {
-            const int result = compareColumn(key.column, left, right);
+            const SortKey &key = m_sortKeys[level];
+            int result = 0;
+            if ((key.tolerance > 0) && (level < (m_sortKeys.size() - 1)) && supportsTolerance(key.column))
+            {
+                // bands are numbered from the largest values down
+                const int bandL = bandOf(key.column, key.tolerance, left.row());
+                const int bandR = bandOf(key.column, key.tolerance, right.row());
+                result = (bandL == bandR) ? 0 : ((bandL > bandR) ? -1 : 1);
+            }
+            else
+            {
+                result = compareColumn(key.column, left, right);
+            }
             if (result == 0)
                 continue;
             return (key.order == sortOrder()) ? (result < 0) : (result > 0);
@@ -230,9 +242,70 @@ bool SearchSortModel::lessThan(const QModelIndex &left, const QModelIndex &right
     };
 }
 
+bool SearchSortModel::supportsTolerance(const int column)
+{
+    return (column == SIZE) || (column == SEEDS) || (column == LEECHES);
+}
+
+void SearchSortModel::setSourceModel(QAbstractItemModel *sourceModel)
+{
+    // connected before the proxy's own handlers, so the bands are marked stale before it re-sorts
+    if (sourceModel)
+    {
+        const auto markDirty = [this]() { m_bandsDirty = true; };
+        connect(sourceModel, &QAbstractItemModel::rowsInserted, this, markDirty);
+        connect(sourceModel, &QAbstractItemModel::rowsRemoved, this, markDirty);
+        connect(sourceModel, &QAbstractItemModel::dataChanged, this, markDirty);
+        connect(sourceModel, &QAbstractItemModel::modelReset, this, markDirty);
+        connect(sourceModel, &QAbstractItemModel::layoutChanged, this, markDirty);
+    }
+    m_bandsDirty = true;
+    base::setSourceModel(sourceModel);
+}
+
+int SearchSortModel::bandOf(const int column, const double tolerance, const int sourceRow) const
+{
+    if (m_bandsDirty)
+    {
+        m_bands.clear();
+        m_bandsDirty = false;
+    }
+    auto it = m_bands.find(column);
+    if (it == m_bands.end())
+    {
+        // Walk the values from the largest down; a band holds every value within the tolerance
+        // of the band's largest value. Grouping this way keeps "equal" consistent for sorting.
+        const QAbstractItemModel *model = sourceModel();
+        const int rows = model ? model->rowCount() : 0;
+        QList<std::pair<double, int>> values;
+        values.reserve(rows);
+        for (int row = 0; row < rows; ++row)
+            values.append({model->index(row, column).data(sortRole()).toDouble(), row});
+        std::sort(values.begin(), values.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+
+        QList<int> bands(rows, 0);
+        int band = -1;
+        double top = 0;
+        // counts like seeders also allow a difference of 1, so 4 and 5 seeders aren't split
+        const double minGap = (column == SIZE) ? 0 : 1;
+        for (const auto &[value, row] : values)
+        {
+            if ((band < 0) || (value < (top - std::max(top * tolerance, minGap))))
+            {
+                ++band;
+                top = value;
+            }
+            bands[row] = band;
+        }
+        it = m_bands.insert(column, bands);
+    }
+    return it->value(sourceRow, 0);
+}
+
 void SearchSortModel::setSortKeys(const QList<SortKey> &keys)
 {
     m_sortKeys = keys;
+    m_bandsDirty = true;
     if (keys.isEmpty())
         return;
     // sort from scratch, so rows don't keep an order left over from the previous keys
@@ -249,7 +322,8 @@ QString SearchSortModel::sortKeysToString(const QList<SortKey> &keys)
 {
     QStringList parts;
     for (const SortKey &key : keys)
-        parts.append(u"%1:%2"_s.arg(key.column).arg((key.order == Qt::AscendingOrder) ? u'a' : u'd'));
+        parts.append(u"%1:%2:%3"_s.arg(key.column).arg((key.order == Qt::AscendingOrder) ? u'a' : u'd')
+            .arg(qRound(key.tolerance * 100)));
     return parts.join(u',');
 }
 
@@ -265,7 +339,9 @@ QList<SearchSortModel::SortKey> SearchSortModel::sortKeysFromString(const QStrin
             continue;
         if (std::any_of(keys.cbegin(), keys.cend(), [column](const SortKey &key) { return key.column == column; }))
             continue;
-        keys.append({column, (bits.value(1) == u"d") ? Qt::DescendingOrder : Qt::AscendingOrder});
+        const double tolerance = !supportsTolerance(column) ? 0
+            : ((bits.size() < 3) ? DEFAULT_TOLERANCE : (std::clamp(bits.value(2).toInt(), 0, 50) / 100.0));
+        keys.append({column, (bits.value(1) == u"d") ? Qt::DescendingOrder : Qt::AscendingOrder, tolerance});
     }
     return keys;
 }

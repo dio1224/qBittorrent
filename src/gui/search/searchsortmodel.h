@@ -174,6 +174,9 @@ public:
     {
         int column = 0;
         Qt::SortOrder order = Qt::AscendingOrder;
+        // Size, Seeders and Leechers: values within this share (0.10 = 10%) of the top of their
+        // band count as equal, so the next level decides their order. Ignored on the last level.
+        double tolerance = 0;
 
         friend bool operator==(const SortKey &, const SortKey &) = default;
     };
@@ -181,6 +184,10 @@ public:
     QList<SortKey> sortKeys() const;
     static QString sortKeysToString(const QList<SortKey> &keys);
     static QList<SortKey> sortKeysFromString(const QString &text);
+    static bool supportsTolerance(int column);
+    static constexpr double DEFAULT_TOLERANCE = 0.10;
+
+    void setSourceModel(QAbstractItemModel *sourceModel) override;
 
 protected:
     bool lessThan(const QModelIndex &left, const QModelIndex &right) const override;
@@ -213,6 +220,10 @@ private:
     QList<FilterRule> m_rawFilterRules;
     QList<FilterRule> m_rawLocalRules;
     QList<SortKey> m_sortKeys;
+    // band number per source row for each "close enough" sort column; rebuilt when the results change
+    int bandOf(int column, double tolerance, int sourceRow) const;
+    mutable QHash<int, QList<int>> m_bands;
+    mutable bool m_bandsDirty = true;
     QHash<int, QSet<QString>> m_columnValueFilters;
     mutable int m_ignoredValueColumn = -1;
     int m_minSeeds = 0, m_maxSeeds = -1;

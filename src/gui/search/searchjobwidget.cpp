@@ -37,6 +37,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QSpinBox>
 #include <QDesktopServices>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -127,7 +128,8 @@ namespace
                 {
                     if (!usedColumns().contains(column))
                     {
-                        addRow({column, isTextColumn(column) ? Qt::AscendingOrder : Qt::DescendingOrder});
+                        addRow({column, isTextColumn(column) ? Qt::AscendingOrder : Qt::DescendingOrder,
+                            SearchSortModel::supportsTolerance(column) ? SearchSortModel::DEFAULT_TOLERANCE : 0});
                         return;
                     }
                 }
@@ -145,7 +147,7 @@ namespace
             for (const SearchSortModel::SortKey &key : keys)
                 addRow(key);
             if (m_rows.isEmpty())
-                addRow({SearchSortModel::SEEDS, Qt::DescendingOrder});
+                addRow({SearchSortModel::SEEDS, Qt::DescendingOrder, SearchSortModel::DEFAULT_TOLERANCE});
             setMinimumWidth(520);
         }
 
@@ -159,7 +161,8 @@ namespace
                 if (seen.contains(column))
                     continue;  // a column used twice only counts the first time
                 seen.insert(column);
-                result.append({column, static_cast<Qt::SortOrder>(row.order->currentData().toInt())});
+                const double tolerance = SearchSortModel::supportsTolerance(column) ? (row.close->value() / 100.0) : 0;
+                result.append({column, static_cast<Qt::SortOrder>(row.order->currentData().toInt()), tolerance});
             }
             return result;
         }
@@ -171,6 +174,8 @@ namespace
             QLabel *label = nullptr;
             QComboBox *column = nullptr;
             QComboBox *order = nullptr;
+            QWidget *closeBox = nullptr;
+            QSpinBox *close = nullptr;
         };
 
         QSet<int> usedColumns() const
@@ -204,6 +209,16 @@ namespace
             row.column->setCurrentIndex(std::max(0, row.column->findData(key.column)));
             row.order = new QComboBox(row.widget);
             fillOrders(row, key.order);
+            row.closeBox = new QWidget(row.widget);
+            auto *closeLayout = new QHBoxLayout(row.closeBox);
+            closeLayout->setContentsMargins(0, 0, 0, 0);
+            closeLayout->addWidget(new QLabel(SearchJobWidget::tr("same if within"), row.closeBox));
+            row.close = new QSpinBox(row.closeBox);
+            row.close->setRange(0, 50);
+            row.close->setSuffix(u"%"_s);
+            row.close->setValue(qRound(key.tolerance * 100));
+            row.close->setToolTip(SearchJobWidget::tr("Values this close to each other count as equal here, so the next level decides their order.\n0% means only exact ties."));
+            closeLayout->addWidget(row.close);
             auto *up = new QToolButton(row.widget);
             up->setText(u"\u25B2"_s);
             up->setToolTip(SearchJobWidget::tr("Move up"));
@@ -216,6 +231,7 @@ namespace
             rowLayout->addWidget(row.label);
             rowLayout->addWidget(row.column, 2);
             rowLayout->addWidget(row.order, 2);
+            rowLayout->addWidget(row.closeBox);
             rowLayout->addWidget(up);
             rowLayout->addWidget(down);
             rowLayout->addWidget(remove);
@@ -228,6 +244,9 @@ namespace
                 const Row &r = m_rows[indexOf(widget)];
                 // keep the direction, relabelled for the new column
                 fillOrders(r, static_cast<Qt::SortOrder>(r.order->currentData().toInt()));
+                if (r.close->value() == 0)
+                    r.close->setValue(qRound(SearchSortModel::DEFAULT_TOLERANCE * 100));
+                refreshLabels();
             });
             connect(up, &QToolButton::clicked, this, [this, widget]() { swapRows(indexOf(widget), indexOf(widget) - 1); });
             connect(down, &QToolButton::clicked, this, [this, widget]() { swapRows(indexOf(widget), indexOf(widget) + 1); });
@@ -260,6 +279,9 @@ namespace
             const auto orderA = static_cast<Qt::SortOrder>(m_rows[a].order->currentData().toInt());
             const int columnB = m_rows[b].column->currentData().toInt();
             const auto orderB = static_cast<Qt::SortOrder>(m_rows[b].order->currentData().toInt());
+            const int closeA = m_rows[a].close->value();
+            m_rows[a].close->setValue(m_rows[b].close->value());
+            m_rows[b].close->setValue(closeA);
             m_rows[a].column->setCurrentIndex(m_rows[a].column->findData(columnB));
             fillOrders(m_rows[a], orderB);
             m_rows[b].column->setCurrentIndex(m_rows[b].column->findData(columnA));
@@ -269,7 +291,13 @@ namespace
         void refreshLabels()
         {
             for (int i = 0; i < m_rows.size(); ++i)
+            {
                 m_rows[i].label->setText((i == 0) ? SearchJobWidget::tr("Sort by") : SearchJobWidget::tr("Then by"));
+                // "close enough" only matters when a later level breaks the ties
+                const bool numeric = SearchSortModel::supportsTolerance(m_rows[i].column->currentData().toInt());
+                m_rows[i].closeBox->setVisible(numeric);
+                m_rows[i].closeBox->setEnabled(i < (m_rows.size() - 1));
+            }
         }
 
         QList<std::pair<int, QString>> m_columns;
@@ -1231,7 +1259,11 @@ void SearchJobWidget::showSortDialog()
     }
     QList<SearchSortModel::SortKey> current = m_proxyModel->sortKeys();
     if (current.isEmpty() && (header()->sortIndicatorSection() >= 0))
-        current.append({header()->sortIndicatorSection(), header()->sortIndicatorOrder()});
+    {
+        const int column = header()->sortIndicatorSection();
+        current.append({column, header()->sortIndicatorOrder(),
+            SearchSortModel::supportsTolerance(column) ? SearchSortModel::DEFAULT_TOLERANCE : 0});
+    }
 
     SortDialog dialog(current, columns, this);
     if (dialog.exec() != QDialog::Accepted)
@@ -1266,7 +1298,8 @@ void SearchJobWidget::onSortIndicatorChanged(const int column, const Qt::SortOrd
         else if (it != keys.end())
             it->order = (it->order == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
         else
-            keys.append({column, isTextColumn(column) ? Qt::AscendingOrder : Qt::DescendingOrder});
+            keys.append({column, isTextColumn(column) ? Qt::AscendingOrder : Qt::DescendingOrder,
+                SearchSortModel::supportsTolerance(column) ? SearchSortModel::DEFAULT_TOLERANCE : 0});
     }
     else if (!keys.isEmpty() && (keys.first().column == column))
     {
@@ -1276,8 +1309,9 @@ void SearchJobWidget::onSortIndicatorChanged(const int column, const Qt::SortOrd
     else
     {
         // a plain click on another column sorts by that one column, like a spreadsheet
-        keys = {{column, order}};
+        keys = {{column, order, SearchSortModel::supportsTolerance(column) ? SearchSortModel::DEFAULT_TOLERANCE : 0}};
     }
+    // a key added as the next level makes the one before it a tie-break level, where "close enough" applies
     applySortKeys(keys);
 }
 
@@ -1304,8 +1338,10 @@ void SearchJobWidget::updateColumnFilterTitles()
             {
                 if (keys[level].column == it.key())
                 {
-                    title += u" (%1 %2)"_s.arg(level + 1)
-                        .arg((keys[level].order == Qt::AscendingOrder) ? u"\u2191"_s : u"\u2193"_s);
+                    title += u" (%1 %2%3)"_s.arg(level + 1)
+                        .arg((keys[level].order == Qt::AscendingOrder) ? u"\u2191"_s : u"\u2193"_s,
+                            ((keys[level].tolerance > 0) && (level < (keys.size() - 1)))
+                                ? u" \u00B1%1%"_s.arg(qRound(keys[level].tolerance * 100)) : QString());
                 }
             }
         }
