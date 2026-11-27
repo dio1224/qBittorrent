@@ -34,6 +34,9 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDesktopServices>
 #include <QFrame>
 #include <QHBoxLayout>
@@ -47,6 +50,8 @@
 #include <QPalette>
 #include <QStandardItemModel>
 #include <QTimer>
+#include <QToolButton>
+#include <QVBoxLayout>
 #include <QProcess>
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -75,6 +80,202 @@
 
 namespace
 {
+
+    // The last multi-column sort used, so new tabs open sorted the same way
+    const QString SORT_KEYS_KEY = u"Search/Dio/SortKeys"_s;
+
+    bool isTextColumn(const int column)
+    {
+        return (column == SearchSortModel::NAME) || (column == SearchSortModel::ENGINE_NAME)
+            || (column == SearchSortModel::ENGINE_URL) || (column == SearchSortModel::CODEC);
+    }
+
+    // What the two directions mean for a column, in words
+    QString orderLabel(const int column, const Qt::SortOrder order)
+    {
+        const bool asc = (order == Qt::AscendingOrder);
+        if (isTextColumn(column))
+            return asc ? SearchJobWidget::tr("A to Z") : SearchJobWidget::tr("Z to A");
+        if (column == SearchSortModel::PUB_DATE)
+            return asc ? SearchJobWidget::tr("Oldest first") : SearchJobWidget::tr("Newest first");
+        if ((column == SearchSortModel::SIZE) || (column == SearchSortModel::SEEDS) || (column == SearchSortModel::LEECHES))
+            return asc ? SearchJobWidget::tr("Smallest to largest") : SearchJobWidget::tr("Largest to smallest");
+        return asc ? SearchJobWidget::tr("Lowest first") : SearchJobWidget::tr("Highest first");
+    }
+
+    // Excel-style "Sort" dialog: Sort by, Then by, Then by...
+    class SortDialog final : public QDialog
+    {
+    public:
+        SortDialog(const QList<SearchSortModel::SortKey> &keys, const QList<std::pair<int, QString>> &columns, QWidget *parent)
+            : QDialog(parent)
+            , m_columns {columns}
+        {
+            setWindowTitle(SearchJobWidget::tr("Sort results"));
+            auto *layout = new QVBoxLayout(this);
+            auto *hint = new QLabel(SearchJobWidget::tr("Rows are sorted by the first column; the next ones only decide the order of rows that tie."), this);
+            hint->setWordWrap(true);
+            layout->addWidget(hint);
+            m_rowsLayout = new QVBoxLayout;
+            layout->addLayout(m_rowsLayout);
+
+            auto *addButton = new QPushButton(SearchJobWidget::tr("Add level"), this);
+            connect(addButton, &QPushButton::clicked, this, [this]()
+            {
+                // the first column not used yet
+                for (const auto &[column, title] : m_columns)
+                {
+                    if (!usedColumns().contains(column))
+                    {
+                        addRow({column, isTextColumn(column) ? Qt::AscendingOrder : Qt::DescendingOrder});
+                        return;
+                    }
+                }
+            });
+            auto *addRowLayout = new QHBoxLayout;
+            addRowLayout->addWidget(addButton);
+            addRowLayout->addStretch();
+            layout->addLayout(addRowLayout);
+
+            auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+            connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+            connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+            layout->addWidget(buttons);
+
+            for (const SearchSortModel::SortKey &key : keys)
+                addRow(key);
+            if (m_rows.isEmpty())
+                addRow({SearchSortModel::SEEDS, Qt::DescendingOrder});
+            setMinimumWidth(520);
+        }
+
+        QList<SearchSortModel::SortKey> keys() const
+        {
+            QList<SearchSortModel::SortKey> result;
+            QSet<int> seen;
+            for (const Row &row : m_rows)
+            {
+                const int column = row.column->currentData().toInt();
+                if (seen.contains(column))
+                    continue;  // a column used twice only counts the first time
+                seen.insert(column);
+                result.append({column, static_cast<Qt::SortOrder>(row.order->currentData().toInt())});
+            }
+            return result;
+        }
+
+    private:
+        struct Row
+        {
+            QWidget *widget = nullptr;
+            QLabel *label = nullptr;
+            QComboBox *column = nullptr;
+            QComboBox *order = nullptr;
+        };
+
+        QSet<int> usedColumns() const
+        {
+            QSet<int> used;
+            for (const Row &row : m_rows)
+                used.insert(row.column->currentData().toInt());
+            return used;
+        }
+
+        void fillOrders(const Row &row, const Qt::SortOrder order)
+        {
+            const int column = row.column->currentData().toInt();
+            row.order->clear();
+            row.order->addItem(orderLabel(column, Qt::AscendingOrder), static_cast<int>(Qt::AscendingOrder));
+            row.order->addItem(orderLabel(column, Qt::DescendingOrder), static_cast<int>(Qt::DescendingOrder));
+            row.order->setCurrentIndex((order == Qt::AscendingOrder) ? 0 : 1);
+        }
+
+        void addRow(const SearchSortModel::SortKey &key)
+        {
+            Row row;
+            row.widget = new QWidget(this);
+            auto *rowLayout = new QHBoxLayout(row.widget);
+            rowLayout->setContentsMargins(0, 0, 0, 0);
+            row.label = new QLabel(row.widget);
+            row.label->setMinimumWidth(60);
+            row.column = new QComboBox(row.widget);
+            for (const auto &[column, title] : m_columns)
+                row.column->addItem(title, column);
+            row.column->setCurrentIndex(std::max(0, row.column->findData(key.column)));
+            row.order = new QComboBox(row.widget);
+            fillOrders(row, key.order);
+            auto *up = new QToolButton(row.widget);
+            up->setText(u"\u25B2"_s);
+            up->setToolTip(SearchJobWidget::tr("Move up"));
+            auto *down = new QToolButton(row.widget);
+            down->setText(u"\u25BC"_s);
+            down->setToolTip(SearchJobWidget::tr("Move down"));
+            auto *remove = new QToolButton(row.widget);
+            remove->setText(u"\u2715"_s);
+            remove->setToolTip(SearchJobWidget::tr("Delete level"));
+            rowLayout->addWidget(row.label);
+            rowLayout->addWidget(row.column, 2);
+            rowLayout->addWidget(row.order, 2);
+            rowLayout->addWidget(up);
+            rowLayout->addWidget(down);
+            rowLayout->addWidget(remove);
+            m_rowsLayout->addWidget(row.widget);
+            m_rows.append(row);
+
+            QWidget *widget = row.widget;
+            connect(row.column, &QComboBox::currentIndexChanged, this, [this, widget]()
+            {
+                const Row &r = m_rows[indexOf(widget)];
+                // keep the direction, relabelled for the new column
+                fillOrders(r, static_cast<Qt::SortOrder>(r.order->currentData().toInt()));
+            });
+            connect(up, &QToolButton::clicked, this, [this, widget]() { swapRows(indexOf(widget), indexOf(widget) - 1); });
+            connect(down, &QToolButton::clicked, this, [this, widget]() { swapRows(indexOf(widget), indexOf(widget) + 1); });
+            connect(remove, &QToolButton::clicked, this, [this, widget]()
+            {
+                if (m_rows.size() <= 1)
+                    return;
+                const int i = indexOf(widget);
+                m_rows.takeAt(i).widget->deleteLater();
+                refreshLabels();
+            });
+            refreshLabels();
+        }
+
+        int indexOf(const QWidget *widget) const
+        {
+            for (int i = 0; i < m_rows.size(); ++i)
+            {
+                if (m_rows[i].widget == widget)
+                    return i;
+            }
+            return -1;
+        }
+
+        void swapRows(const int a, const int b)
+        {
+            if ((a < 0) || (b < 0) || (a >= m_rows.size()) || (b >= m_rows.size()))
+                return;
+            const int columnA = m_rows[a].column->currentData().toInt();
+            const auto orderA = static_cast<Qt::SortOrder>(m_rows[a].order->currentData().toInt());
+            const int columnB = m_rows[b].column->currentData().toInt();
+            const auto orderB = static_cast<Qt::SortOrder>(m_rows[b].order->currentData().toInt());
+            m_rows[a].column->setCurrentIndex(m_rows[a].column->findData(columnB));
+            fillOrders(m_rows[a], orderB);
+            m_rows[b].column->setCurrentIndex(m_rows[b].column->findData(columnA));
+            fillOrders(m_rows[b], orderA);
+        }
+
+        void refreshLabels()
+        {
+            for (int i = 0; i < m_rows.size(); ++i)
+                m_rows[i].label->setText((i == 0) ? SearchJobWidget::tr("Sort by") : SearchJobWidget::tr("Then by"));
+        }
+
+        QList<std::pair<int, QString>> m_columns;
+        QVBoxLayout *m_rowsLayout = nullptr;
+        QList<Row> m_rows;
+    };
 
     // Results with a shorter (normalized) name than this are never merged by name
     const int MIN_MERGE_NAME_LENGTH = 8;
@@ -278,6 +479,16 @@ SearchJobWidget::SearchJobWidget(const QString &id, IGUIApplication *app, QWidge
     connect(header(), &QHeaderView::sectionResized, this, &SearchJobWidget::saveSettings);
     connect(header(), &QHeaderView::sectionMoved, this, &SearchJobWidget::saveSettings);
     connect(header(), &QHeaderView::sortIndicatorChanged, this, &SearchJobWidget::saveSettings);
+    connect(header(), &QHeaderView::sortIndicatorChanged, this, &SearchJobWidget::onSortIndicatorChanged);
+    if (const QList<SearchSortModel::SortKey> savedKeys = SearchSortModel::sortKeysFromString(
+            SettingsStorage::instance()->loadValue<QString>(SORT_KEYS_KEY)); savedKeys.size() > 1)
+    {
+        applySortKeys(savedKeys);
+    }
+    else if (header()->sortIndicatorSection() >= 0)
+    {
+        m_proxyModel->setSortKeys({{header()->sortIndicatorSection(), header()->sortIndicatorOrder()}});
+    }
 
     m_lineEditSearchResultsFilter = new LineEdit(this);
     m_lineEditSearchResultsFilter->setPlaceholderText(tr("Filter search results..."));
@@ -884,6 +1095,17 @@ void SearchJobWidget::displayColumnHeaderMenu(const QPoint &pos)
     menu->setAttribute(Qt::WA_DeleteOnClose);
     menu->setToolTipsVisible(true);
 
+    QAction *sortAction = menu->addAction(tr("Sort by several columns..."), this, &SearchJobWidget::showSortDialog);
+    sortAction->setToolTip(tr("Like a spreadsheet: sort by one column, then by another for rows that tie.\nTip: Shift-click a column header to add it as the next sort level."));
+    if (m_proxyModel->sortKeys().size() > 1)
+    {
+        menu->addAction(tr("Sort by one column only"), this, [this]()
+        {
+            applySortKeys({m_proxyModel->sortKeys().first()});
+        });
+    }
+    menu->addSeparator();
+
     // Spreadsheet-style filter for the column that was clicked: show only some of its values
     const int column = header()->logicalIndexAt(pos);
     const QList<int> valueColumns
@@ -998,6 +1220,67 @@ void SearchJobWidget::displayColumnHeaderMenu(const QPoint &pos)
     menu->popup(QCursor::pos());
 }
 
+void SearchJobWidget::showSortDialog()
+{
+    QList<std::pair<int, QString>> columns;
+    for (int i = 0; i < SearchSortModel::NB_SEARCH_COLUMNS; ++i)
+    {
+        if ((i == SearchSortModel::DL_LINK) || (i == SearchSortModel::DESC_LINK))
+            continue;
+        columns.append({i, m_columnTitles.value(i)});
+    }
+    QList<SearchSortModel::SortKey> current = m_proxyModel->sortKeys();
+    if (current.isEmpty() && (header()->sortIndicatorSection() >= 0))
+        current.append({header()->sortIndicatorSection(), header()->sortIndicatorOrder()});
+
+    SortDialog dialog(current, columns, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    applySortKeys(dialog.keys());
+}
+
+void SearchJobWidget::applySortKeys(const QList<SearchSortModel::SortKey> &keys)
+{
+    if (keys.isEmpty())
+        return;
+    m_applyingSort = true;
+    m_proxyModel->setSortKeys(keys);
+    header()->setSortIndicator(keys.first().column, keys.first().order);
+    m_applyingSort = false;
+    SettingsStorage::instance()->storeValue(SORT_KEYS_KEY, SearchSortModel::sortKeysToString(keys));
+    updateColumnFilterTitles();
+}
+
+void SearchJobWidget::onSortIndicatorChanged(const int column, const Qt::SortOrder order)
+{
+    if (m_applyingSort || (column < 0))
+        return;
+
+    QList<SearchSortModel::SortKey> keys = m_proxyModel->sortKeys();
+    if (QApplication::keyboardModifiers().testFlag(Qt::ShiftModifier) && !keys.isEmpty())
+    {
+        // Shift-click: add the column as the next level, or flip it if it's already a level
+        auto it = std::find_if(keys.begin(), keys.end(), [column](const SearchSortModel::SortKey &key) { return key.column == column; });
+        if (it == keys.begin())
+            it->order = order;
+        else if (it != keys.end())
+            it->order = (it->order == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
+        else
+            keys.append({column, isTextColumn(column) ? Qt::AscendingOrder : Qt::DescendingOrder});
+    }
+    else if (!keys.isEmpty() && (keys.first().column == column))
+    {
+        // clicking the main sort column flips it and keeps the tie-break levels
+        keys.first().order = order;
+    }
+    else
+    {
+        // a plain click on another column sorts by that one column, like a spreadsheet
+        keys = {{column, order}};
+    }
+    applySortKeys(keys);
+}
+
 void SearchJobWidget::updateColumnFilterTitles()
 {
     // a filtered column shows what it's limited to: "Source: REMUX", "Audio: 2 kinds"
@@ -1013,6 +1296,18 @@ void SearchJobWidget::updateColumnFilterTitles()
         else if (selected.size() > 1)
         {
             title += u": "_s + tr("%1 kinds").arg(selected.size());
+        }
+        // with a multi-column sort, every sort column shows its level and direction: "Seeders (2 \u2193)"
+        if (const QList<SearchSortModel::SortKey> keys = m_proxyModel->sortKeys(); keys.size() > 1)
+        {
+            for (int level = 0; level < keys.size(); ++level)
+            {
+                if (keys[level].column == it.key())
+                {
+                    title += u" (%1 %2)"_s.arg(level + 1)
+                        .arg((keys[level].order == Qt::AscendingOrder) ? u"\u2191"_s : u"\u2193"_s);
+                }
+            }
         }
         if (m_searchListModel->headerData(it.key(), Qt::Horizontal, Qt::DisplayRole).toString() != title)
             m_searchListModel->setHeaderData(it.key(), Qt::Horizontal, title);

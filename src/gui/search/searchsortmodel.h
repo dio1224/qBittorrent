@@ -169,6 +169,19 @@ public:
     qint64 minSize() const;
     qint64 maxSize() const;
 
+    // Spreadsheet-style sort on several columns: the first key is the main sort, the rest break ties
+    struct SortKey
+    {
+        int column = 0;
+        Qt::SortOrder order = Qt::AscendingOrder;
+
+        friend bool operator==(const SortKey &, const SortKey &) = default;
+    };
+    void setSortKeys(const QList<SortKey> &keys);
+    QList<SortKey> sortKeys() const;
+    static QString sortKeysToString(const QList<SortKey> &keys);
+    static QList<SortKey> sortKeysFromString(const QString &text);
+
 protected:
     bool lessThan(const QModelIndex &left, const QModelIndex &right) const override;
     bool filterAcceptsRow(int sourceRow, const QModelIndex &sourceParent) const override;
@@ -186,6 +199,7 @@ private:
     bool ruleMatches(int sourceRow, const QModelIndex &sourceParent, const CompiledRule &rule) const;
     QList<CompiledRule> compileRules(const QList<FilterRule> &rules) const;
     void compileSearchTermWords();
+    int compareColumn(int column, const QModelIndex &left, const QModelIndex &right) const;
     bool rulesPass(const QList<CompiledRule> &rules, bool matchAll, int sourceRow, const QModelIndex &sourceParent) const;
 
     QList<CompiledRule> m_filterRules;
@@ -198,6 +212,7 @@ private:
     QList<QRegularExpression> m_searchTermRegexes;
     QList<FilterRule> m_rawFilterRules;
     QList<FilterRule> m_rawLocalRules;
+    QList<SortKey> m_sortKeys;
     QHash<int, QSet<QString>> m_columnValueFilters;
     mutable int m_ignoredValueColumn = -1;
     int m_minSeeds = 0, m_maxSeeds = -1;

@@ -122,6 +122,9 @@ protected:
 
 private slots:
     void displayColumnHeaderMenu(const QPoint &pos);
+    void showSortDialog();
+    void onSortIndicatorChanged(int column, Qt::SortOrder order);
+    void applySortKeys(const QList<SearchSortModel::SortKey> &keys);
 
 private:
     struct RowInfo
@@ -210,6 +213,7 @@ private:
 
     QHash<QString, SearchEngineStatus> m_siteStatus;   // plugin -> best status across this tab's searches
     bool m_retrying = false;
+    bool m_applyingSort = false;
     bool m_siteStatusCounted = false;
     QFrame *m_siteStatusBar = nullptr;
     QLabel *m_siteStatusLabel = nullptr;

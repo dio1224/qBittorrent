@@ -29,6 +29,7 @@
 
 #include "searchsortmodel.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "base/global.h"
@@ -174,8 +175,46 @@ qint64 SearchSortModel::maxSize() const
     return m_maxSize;
 }
 
+int SearchSortModel::compareColumn(const int column, const QModelIndex &left, const QModelIndex &right) const
+{
+    const QModelIndex l = left.siblingAtColumn(column);
+    const QModelIndex r = right.siblingAtColumn(column);
+    if ((column == NAME) || (column == ENGINE_URL) || (column == ENGINE_NAME) || (column == CODEC))
+    {
+        const QString strL = l.data(sortRole()).toString();
+        const QString strR = r.data(sortRole()).toString();
+        if (strL == strR)
+            return 0;
+        return m_naturalLessThan(strL, strR) ? -1 : (m_naturalLessThan(strR, strL) ? 1 : 0);
+    }
+    const QVariant vL = l.data(sortRole());
+    const QVariant vR = r.data(sortRole());
+    if (!vL.isValid() || !vR.isValid())
+        return (vL.isValid() == vR.isValid()) ? 0 : (vL.isValid() ? 1 : -1);  // blanks count as lowest
+    const QPartialOrdering order = QVariant::compare(vL, vR);
+    if (order == QPartialOrdering::Less)
+        return -1;
+    if (order == QPartialOrdering::Greater)
+        return 1;
+    return 0;
+}
+
 bool SearchSortModel::lessThan(const QModelIndex &left, const QModelIndex &right) const
 {
+    if ((m_sortKeys.size() > 1) && (m_sortKeys.first().column == sortColumn()))
+    {
+        // Qt flips the whole result for a descending main sort, so a tie-break column whose
+        // direction differs from the main one compares the other way round
+        for (const SortKey &key : m_sortKeys)
+        {
+            const int result = compareColumn(key.column, left, right);
+            if (result == 0)
+                continue;
+            return (key.order == sortOrder()) ? (result < 0) : (result > 0);
+        }
+        return false;
+    }
+
     switch (sortColumn())
     {
     case NAME:
@@ -189,6 +228,46 @@ bool SearchSortModel::lessThan(const QModelIndex &left, const QModelIndex &right
     default:
         return base::lessThan(left, right);
     };
+}
+
+void SearchSortModel::setSortKeys(const QList<SortKey> &keys)
+{
+    m_sortKeys = keys;
+    if (keys.isEmpty())
+        return;
+    // sort from scratch, so rows don't keep an order left over from the previous keys
+    sort(-1);
+    sort(keys.first().column, keys.first().order);
+}
+
+QList<SearchSortModel::SortKey> SearchSortModel::sortKeys() const
+{
+    return m_sortKeys;
+}
+
+QString SearchSortModel::sortKeysToString(const QList<SortKey> &keys)
+{
+    QStringList parts;
+    for (const SortKey &key : keys)
+        parts.append(u"%1:%2"_s.arg(key.column).arg((key.order == Qt::AscendingOrder) ? u'a' : u'd'));
+    return parts.join(u',');
+}
+
+QList<SearchSortModel::SortKey> SearchSortModel::sortKeysFromString(const QString &text)
+{
+    QList<SortKey> keys;
+    for (const QString &part : text.split(u',', Qt::SkipEmptyParts))
+    {
+        const QStringList bits = part.split(u':');
+        bool ok = false;
+        const int column = bits.value(0).toInt(&ok);
+        if (!ok || (column < 0) || (column >= NB_SEARCH_COLUMNS) || (column == DL_LINK) || (column == DESC_LINK))
+            continue;
+        if (std::any_of(keys.cbegin(), keys.cend(), [column](const SortKey &key) { return key.column == column; }))
+            continue;
+        keys.append({column, (bits.value(1) == u"d") ? Qt::DescendingOrder : Qt::AscendingOrder});
+    }
+    return keys;
 }
 
 void SearchSortModel::compileSearchTermWords()
